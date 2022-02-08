@@ -231,6 +231,7 @@ fetchPendingRequestsLoop:
 	// when `tbc.collectedRequestCount` is less than the `tbc.bestBatchSize`.
 	if tbc.collectedRequestCount < tbc.bestBatchSize {
 		after := time.NewTimer(maxBatchWaitInterval)
+		log.Info("[pd] print maxBatchWaitInterval", zap.Duration("maxBatchWaitInterval", maxBatchWaitInterval))
 		defer after.Stop()
 		for tbc.collectedRequestCount < tbc.bestBatchSize {
 			select {
