@@ -229,6 +229,7 @@ fetchPendingRequestsLoop:
 	// Fetches more pending TSO requests from the channel.
 	// Try to collect `tbc.bestBatchSize` requests, or wait `maxBatchWaitInterval`
 	// when `tbc.collectedRequestCount` is less than the `tbc.bestBatchSize`.
+	log.Info("[pd] tbc.collectedRequestCount", zap.Int("tbc.collectedRequestCount", tbc.collectedRequestCount), zap.Int("tbc.collectedRequestCount", tbc.collectedRequestCount))
 	if tbc.collectedRequestCount < tbc.bestBatchSize {
 		after := time.NewTimer(maxBatchWaitInterval)
 		log.Info("[pd] print maxBatchWaitInterval", zap.Duration("maxBatchWaitInterval", maxBatchWaitInterval))
