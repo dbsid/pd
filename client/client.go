@@ -220,6 +220,7 @@ fetchPendingRequestsLoop:
 		}
 	}
 
+	log.Info("[pd] tbc numbers", zap.Int("tbc.collectedRequestCount", tbc.collectedRequestCount), zap.Int("tbc.maxBatchSize", tbc.maxBatchSize), zap.Int("tbc.bestBatchSize", tbc.bestBatchSize), zap.Duration("maxBatchWaitInterval", maxBatchWaitInterval))
 	// Check whether we should fetch more pending TSO requests from the channel.
 	// TODO: maybe consider the actual load that returns through a TSO response from PD server.
 	if tbc.collectedRequestCount >= tbc.maxBatchSize || maxBatchWaitInterval <= 0 {
