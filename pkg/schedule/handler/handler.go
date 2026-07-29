@@ -29,6 +29,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
 	"github.com/pingcap/log"
 
 	"github.com/tikv/pd/pkg/core"
@@ -45,6 +46,7 @@ import (
 	"github.com/tikv/pd/pkg/statistics"
 	"github.com/tikv/pd/pkg/statistics/buckets"
 	"github.com/tikv/pd/pkg/statistics/utils"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 )
 
@@ -641,6 +643,11 @@ func (h *Handler) AddSplitRegionOperator(regionID uint64, policyStr string, keys
 			}
 			splitKeys = append(splitKeys, k)
 		}
+	}
+	tableGroupPolicy, _ := c.(tablegroup.SplitPolicyProvider)
+	if err := tablegroup.EnsureSplitAllowed(tableGroupPolicy, region.GetMeta(),
+		table_grouppb.SplitSource_SPLIT_SOURCE_MANUAL_REQUEST); err != nil {
+		return err
 	}
 
 	op, err := operator.CreateSplitRegionOperator("admin-split-region", region, operator.OpAdmin, pdpb.CheckPolicy(policy), splitKeys)

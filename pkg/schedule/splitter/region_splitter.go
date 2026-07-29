@@ -25,12 +25,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
 	"github.com/pingcap/log"
 
 	"github.com/tikv/pd/pkg/core"
 	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/schedule/operator"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 )
@@ -191,6 +193,11 @@ type splitRegionsHandler struct {
 
 // SplitRegionByKeys split region by keys.
 func (h *splitRegionsHandler) SplitRegionByKeys(region *core.RegionInfo, splitKeys [][]byte) error {
+	policy, _ := h.cluster.(tablegroup.SplitPolicyProvider)
+	if err := tablegroup.EnsureSplitAllowed(policy, region.GetMeta(),
+		table_grouppb.SplitSource_SPLIT_SOURCE_MANUAL_REQUEST); err != nil {
+		return err
+	}
 	op, err := operator.CreateSplitRegionOperator("region-splitter", region, operator.OpSplit, pdpb.CheckPolicy_USEKEY, splitKeys)
 	if err != nil {
 		return err

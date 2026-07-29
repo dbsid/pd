@@ -25,6 +25,7 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
 	"github.com/pingcap/log"
 
 	"github.com/tikv/pd/pkg/core"
@@ -37,6 +38,7 @@ import (
 	"github.com/tikv/pd/pkg/statistics"
 	"github.com/tikv/pd/pkg/statistics/buckets"
 	"github.com/tikv/pd/pkg/statistics/utils"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/utils/keyutil"
 )
 
@@ -952,6 +954,12 @@ func (bs *balanceSolver) splitBucketsOperator(region *core.RegionInfo, keys [][]
 	desc := splitHotReadBuckets
 	if bs.rwTy == utils.Write {
 		desc = splitHotWriteBuckets
+	}
+	policy, _ := bs.SchedulerCluster.(tablegroup.SplitPolicyProvider)
+	if err := tablegroup.EnsureSplitAllowed(policy, region.GetMeta(),
+		table_grouppb.SplitSource_SPLIT_SOURCE_AUTOMATIC_LOAD); err != nil {
+		log.Debug("Table Group policy rejected hot Region split", errs.ZapError(err))
+		return nil
 	}
 
 	op, err := operator.CreateSplitRegionOperator(desc, region, operator.OpSplit, pdpb.CheckPolicy_USEKEY, splitKeys)

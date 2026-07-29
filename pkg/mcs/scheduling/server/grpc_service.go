@@ -36,6 +36,7 @@ import (
 	"github.com/tikv/pd/pkg/mcs/registry"
 	"github.com/tikv/pd/pkg/mcs/scheduling/server/meta"
 	"github.com/tikv/pd/pkg/schedule/hbstream"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
@@ -167,6 +168,12 @@ func (s *Service) RegionHeartbeat(stream schedulingpb.Scheduling_RegionHeartbeat
 		start := time.Now()
 		// scheduling service doesn't sync the pd server config, so we use 0 here
 		region := core.RegionFromHeartbeat(request, 0)
+		if err := c.GetTableGroupPolicy().ValidateRegion(region.GetMeta()); err != nil {
+			regionHeartbeatCounter.WithLabelValues(storeAddress, storeLabel, "error").Inc()
+			regionHeartbeatHandleDuration.WithLabelValues(storeAddress, storeLabel).Observe(time.Since(start).Seconds())
+			log.Debug("reject Table Group Region heartbeat", zap.Error(err))
+			continue
+		}
 		err = c.HandleRegionHeartbeat(region)
 		if err != nil {
 			regionHeartbeatCounter.WithLabelValues(storeAddress, storeLabel, "error").Inc()
@@ -387,6 +394,15 @@ func (s *Service) AskBatchSplit(_ context.Context, request *schedulingpb.AskBatc
 		}, nil
 	}
 	region := c.GetRegion(reqRegion.GetId())
+	regionMeta := reqRegion
+	if region != nil {
+		regionMeta = region.GetMeta()
+	}
+	if err := tablegroup.EnsureSplitAllowed(c, regionMeta, tablegroup.SplitSourceFromReason(request.GetReason())); err != nil {
+		return &schedulingpb.AskBatchSplitResponse{
+			Header: wrapErrorToHeader(schedulingpb.ErrorType_UNKNOWN, err.Error()),
+		}, nil
+	}
 	if affinityManager := c.GetAffinityManager(); affinityManager != nil && !affinityManager.AllowSplit(region, request.GetReason()) {
 		c.GetCoordinator().GetHeartbeatStreams().SendMsg(region, &hbstream.Operation{ChangeSplit: &pdpb.ChangeSplit{AutoSplitEnabled: false}})
 		return &schedulingpb.AskBatchSplitResponse{

@@ -50,6 +50,7 @@ import (
 	"github.com/tikv/pd/pkg/mcs/scheduling/server/config"
 	"github.com/tikv/pd/pkg/mcs/scheduling/server/meta"
 	"github.com/tikv/pd/pkg/mcs/scheduling/server/rule"
+	mcstablegroup "github.com/tikv/pd/pkg/mcs/scheduling/server/tablegroup"
 	"github.com/tikv/pd/pkg/mcs/server"
 	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/mcs/utils/constant"
@@ -514,13 +515,14 @@ func (s *Server) startCluster(ctx context.Context) error {
 	storage := endpoint.NewStorageEndpoint(kv.NewMemoryKV(), nil)
 
 	var (
-		hbStreams       *hbstream.HeartbeatStreams
-		configWatcher   *config.Watcher
-		metaWatcher     *meta.Watcher
-		ruleWatcher     *rule.Watcher
-		affinityWatcher *affinity.Watcher
-		cluster         *Cluster
-		err             error
+		hbStreams         *hbstream.HeartbeatStreams
+		configWatcher     *config.Watcher
+		metaWatcher       *meta.Watcher
+		ruleWatcher       *rule.Watcher
+		affinityWatcher   *affinity.Watcher
+		tableGroupWatcher *mcstablegroup.Watcher
+		cluster           *Cluster
+		err               error
 	)
 
 	var initSucceeded bool
@@ -553,6 +555,10 @@ func (s *Server) startCluster(ctx context.Context) error {
 			affinityWatcher.Close()
 			affinityWatcher = nil
 		}
+		if tableGroupWatcher != nil {
+			tableGroupWatcher.Close()
+			tableGroupWatcher = nil
+		}
 		if storage != nil {
 			storage.Close()
 		}
@@ -580,14 +586,19 @@ func (s *Server) startCluster(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	tableGroupWatcher, err = mcstablegroup.NewWatcher(ctx, s.GetClient(), cluster.GetTableGroupPolicy())
+	if err != nil {
+		return err
+	}
 
-	cluster.SetRuntimeResources(metaWatcher, configWatcher, ruleWatcher, affinityWatcher)
+	cluster.SetRuntimeResources(metaWatcher, configWatcher, ruleWatcher, affinityWatcher, tableGroupWatcher)
 	// Set watchers to nil to avoid being closed in defer when cluster initialization is successful,
 	// since cluster will take over the ownership of these watchers and close them when stopping cluster.
 	metaWatcher = nil
 	configWatcher = nil
 	ruleWatcher = nil
 	affinityWatcher = nil
+	tableGroupWatcher = nil
 	cluster.StartBackgroundJobs()
 	s.cluster.Store(cluster)
 	initSucceeded = true

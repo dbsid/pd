@@ -21,6 +21,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/pingcap/kvproto/pkg/metapb"
+
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/pkg/mock/mockconfig"
 	"github.com/tikv/pd/pkg/schedule/labeler"
@@ -70,4 +72,10 @@ func TestSplit(t *testing.T) {
 	splitKeys = op.Step(0).(operator.SplitRegion).SplitKeys
 	re.Equal("bb", hex.EncodeToString(splitKeys[0]))
 	re.Equal("dd", hex.EncodeToString(splitKeys[1]))
+
+	protected := cluster.GetRegion(1)
+	protected.GetMeta().TableGroup = &metapb.TableGroupRegionMeta{
+		KeyspaceId: 1, TableGroupId: 101, AppliedMetadataVersion: 1,
+	}
+	re.Nil(sc.Check(protected), "Table Group policy must suppress split checker operators")
 }

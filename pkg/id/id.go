@@ -51,6 +51,8 @@ type Allocator interface {
 	SetBase(newBase uint64) error
 	// Alloc allocs a unique id.
 	Alloc(count uint32) (uint64, uint32, error)
+	// AllocAt allocates the requested ID only when it has not been globally reserved.
+	AllocAt(id uint64) (bool, error)
 	// Rebase resets the base for the allocator from the persistent window boundary,
 	// which also resets the end of the allocator. (base, end) is the range that can
 	// be allocated in memory.
@@ -130,6 +132,70 @@ func (alloc *allocatorImpl) Alloc(count uint32) (uint64, uint32, error) {
 	}
 
 	return alloc.base, count, nil
+}
+
+// AllocAt allocates an exact global ID and skips lower unallocated IDs.
+func (alloc *allocatorImpl) AllocAt(id uint64) (bool, error) {
+	alloc.mu.Lock()
+	defer alloc.mu.Unlock()
+
+	if id == 0 || id > alloc.effectiveEnd {
+		return false, errs.ErrIDExhausted.FastGenByArgs()
+	}
+	if id <= alloc.base {
+		return false, nil
+	}
+	if id <= alloc.end {
+		alloc.base = id
+		return true, nil
+	}
+
+	var key string
+	if alloc.label == KeyspaceLabel {
+		key = keypath.KeyspaceAllocIDPath()
+	} else {
+		key = keypath.AllocIDPath()
+	}
+	leaderPath := keypath.ElectionPath(nil)
+	cmps := []clientv3.Cmp{clientv3.Compare(clientv3.Value(leaderPath), "=", alloc.member)}
+	value, err := etcdutil.GetValue(alloc.client, key)
+	if err != nil {
+		return false, err
+	}
+	var reservedEnd uint64
+	if value == nil {
+		cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(key), "=", 0))
+	} else {
+		reservedEnd, err = typeutil.BytesToUint64(value)
+		if err != nil {
+			return false, err
+		}
+		cmps = append(cmps, clientv3.Compare(clientv3.Value(key), "=", string(value)))
+	}
+	if id <= reservedEnd {
+		return false, nil
+	}
+
+	newEnd := alloc.effectiveEnd
+	if alloc.step <= alloc.effectiveEnd-id {
+		newEnd = id + alloc.step
+	}
+	resp, err := kv.NewSlowLogTxn(alloc.client).If(cmps...).Then(
+		clientv3.OpPut(key, string(typeutil.Uint64ToBytes(newEnd))),
+	).Commit()
+	if err != nil {
+		return false, errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByArgs()
+	}
+	if !resp.Succeeded {
+		return false, errs.ErrEtcdTxnConflict.FastGenByArgs()
+	}
+
+	alloc.metrics.idGauge.Set(float64(newEnd))
+	alloc.base = id
+	alloc.end = newEnd
+	log.Info("idAllocator allocates requested id", zap.Uint64("requested-id", id), zap.Uint64("new-end", newEnd),
+		zap.String("label", string(alloc.label)))
+	return true, nil
 }
 
 // SetBase sets the base.
