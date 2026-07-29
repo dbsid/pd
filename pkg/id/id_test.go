@@ -84,6 +84,47 @@ func testAllocator(re *require.Assertions, allocator Allocator) {
 	}
 }
 
+func TestAllocAtClaimsOnlyGloballyUnreservedIDs(t *testing.T) {
+	re := require.New(t)
+	_, client, clean := etcdutil.NewTestEtcdCluster(t, 1, nil)
+	defer clean()
+	_, err := client.Put(context.Background(), leaderPath, memberVal)
+	re.NoError(err)
+
+	allocator := NewAllocator(&AllocatorParams{
+		Client: client,
+		Label:  DefaultLabel,
+		Member: memberVal,
+		Step:   10,
+	})
+	allocated, err := allocator.AllocAt(42)
+	re.NoError(err)
+	re.True(allocated)
+	id, _, err := allocator.Alloc(1)
+	re.NoError(err)
+	re.Equal(uint64(43), id)
+
+	allocated, err = allocator.AllocAt(50)
+	re.NoError(err)
+	re.True(allocated)
+	allocated, err = allocator.AllocAt(50)
+	re.NoError(err)
+	re.False(allocated)
+
+	restarted := NewAllocator(&AllocatorParams{
+		Client: client,
+		Label:  DefaultLabel,
+		Member: memberVal,
+		Step:   10,
+	})
+	allocated, err = restarted.AllocAt(51)
+	re.NoError(err)
+	re.False(allocated, "a restarted allocator must treat the persisted window as reserved")
+	allocated, err = restarted.AllocAt(100)
+	re.NoError(err)
+	re.True(allocated)
+}
+
 // TestIDAllocationEndValue tests if keyspace allocator hits ErrIDExhausted when trying to allocate into reserved range.
 func TestIDAllocationEndValue(t *testing.T) {
 	re := require.New(t)

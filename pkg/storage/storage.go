@@ -50,6 +50,7 @@ type Storage interface {
 	endpoint.MetaServiceGroupStorage
 	endpoint.MaintenanceStorage
 	endpoint.AffinityStorage
+	endpoint.TableGroupStorage
 }
 
 // NewStorageWithMemoryBackend creates a new storage with memory backend.

@@ -22,6 +22,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
 	"github.com/pingcap/log"
 
 	"github.com/tikv/pd/pkg/core"
@@ -31,6 +32,7 @@ import (
 	"github.com/tikv/pd/pkg/schedule/hbstream"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/statistics/buckets"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/pkg/versioninfo"
@@ -87,6 +89,14 @@ func (c *RaftCluster) HandleAskSplit(request *pdpb.AskSplitRequest) (*pdpb.AskSp
 	if err != nil {
 		return nil, err
 	}
+	regionMeta := reqRegion
+	if region := c.GetRegion(reqRegion.GetId()); region != nil {
+		regionMeta = region.GetMeta()
+	}
+	if err := tablegroup.EnsureSplitAllowed(c, regionMeta,
+		table_grouppb.SplitSource_SPLIT_SOURCE_AUTOMATIC_SIZE); err != nil {
+		return nil, err
+	}
 
 	if repMode := c.GetReplicationMode(); repMode != nil && repMode.IsRegionSplitPaused() {
 		return nil, errors.New("region split is paused by replication mode")
@@ -133,11 +143,18 @@ func (c *RaftCluster) HandleAskBatchSplit(request *pdpb.AskBatchSplitRequest) (*
 	if err != nil {
 		return nil, err
 	}
+	region := c.GetRegion(reqRegion.GetId())
+	regionMeta := reqRegion
+	if region != nil {
+		regionMeta = region.GetMeta()
+	}
+	if err := tablegroup.EnsureSplitAllowed(c, regionMeta, tablegroup.SplitSourceFromReason(request.GetReason())); err != nil {
+		return nil, err
+	}
 	if repMode := c.GetReplicationMode(); repMode != nil && repMode.IsRegionSplitPaused() {
 		return nil, errors.New("region split is paused by replication mode")
 	}
 
-	region := c.GetRegion(reqRegion.GetId())
 	if affinityManager := c.GetAffinityManager(); affinityManager != nil && !affinityManager.AllowSplit(region, request.Reason) {
 		c.hbstreams.SendMsg(region, &hbstream.Operation{ChangeSplit: &pdpb.ChangeSplit{AutoSplitEnabled: false}})
 		return nil, errors.New("cannot split affinity region")
@@ -229,9 +246,15 @@ func checkSplitRegions(regions []*metapb.Region) error {
 }
 
 // HandleReportSplit handles the report split request.
-func (*RaftCluster) HandleReportSplit(request *pdpb.ReportSplitRequest) (*pdpb.ReportSplitResponse, error) {
+func (c *RaftCluster) HandleReportSplit(request *pdpb.ReportSplitRequest) (*pdpb.ReportSplitResponse, error) {
 	left := request.GetLeft()
 	right := request.GetRight()
+	for _, region := range []*metapb.Region{left, right} {
+		if err := tablegroup.EnsureSplitAllowed(c, region,
+			table_grouppb.SplitSource_SPLIT_SOURCE_RECOVERY_REPLAY); err != nil {
+			return nil, err
+		}
+	}
 
 	err := checkSplitRegion(left, right)
 	if err != nil {
@@ -253,8 +276,14 @@ func (*RaftCluster) HandleReportSplit(request *pdpb.ReportSplitRequest) (*pdpb.R
 }
 
 // HandleBatchReportSplit handles the batch report split request.
-func (*RaftCluster) HandleBatchReportSplit(request *pdpb.ReportBatchSplitRequest) (*pdpb.ReportBatchSplitResponse, error) {
+func (c *RaftCluster) HandleBatchReportSplit(request *pdpb.ReportBatchSplitRequest) (*pdpb.ReportBatchSplitResponse, error) {
 	regions := request.GetRegions()
+	for _, region := range regions {
+		if err := tablegroup.EnsureSplitAllowed(c, region,
+			table_grouppb.SplitSource_SPLIT_SOURCE_RECOVERY_REPLAY); err != nil {
+			return nil, err
+		}
+	}
 
 	hrm := core.RegionsToHexMeta(regions)
 	err := checkSplitRegions(regions)

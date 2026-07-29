@@ -55,10 +55,12 @@ func (s *captureHeartbeatStream) Send(resp core.RegionHeartbeatResponse) error {
 
 type splitScatterPDClient struct {
 	pdpb.PDClient
-	next uint64
+	next  uint64
+	calls int
 }
 
 func (c *splitScatterPDClient) AllocID(_ context.Context, req *pdpb.AllocIDRequest, _ ...grpc.CallOption) (*pdpb.AllocIDResponse, error) {
+	c.calls++
 	count := req.GetCount()
 	if count == 0 {
 		count = 1
@@ -161,6 +163,28 @@ func TestAskBatchSplitRecordsSplitScatterInSchedulingService(t *testing.T) {
 	re.Len(resp.GetIds(), 1)
 
 	re.Equal(float64(2), splitScatterPendingMetricValue(t))
+}
+
+func TestTableGroupAskBatchSplitRejectsBeforeSchedulingIDAllocation(t *testing.T) {
+	re := require.New(t)
+	svc, cluster, _ := newTestSchedulingServiceForSplit(t)
+	pdClient := &splitScatterPDClient{next: 1000}
+	cluster.SwitchPDLeader(pdClient)
+
+	region := newAffinitySplitTestRegion()
+	region.GetMeta().TableGroup = &metapb.TableGroupRegionMeta{
+		KeyspaceId: 1, TableGroupId: 101, AppliedMetadataVersion: 1,
+	}
+	cluster.PutRegion(region)
+	resp, err := svc.AskBatchSplit(context.Background(), &schedulingpb.AskBatchSplitRequest{
+		Region: region.GetMeta(), SplitCount: 2, Reason: pdpb.SplitReason_LOAD,
+	})
+	re.NoError(err)
+	re.Equal(schedulingpb.ErrorType_UNKNOWN, resp.GetHeader().GetError().GetType())
+	re.Contains(resp.GetHeader().GetError().GetMessage(), "Table Group")
+	re.Empty(resp.GetIds())
+	re.Zero(pdClient.calls, "protected split requests must not call PD AllocID")
+	re.Equal(uint64(1000), pdClient.next)
 }
 
 func newTestSchedulingServiceForSplit(

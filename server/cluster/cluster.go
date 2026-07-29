@@ -37,6 +37,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
 	"github.com/pingcap/log"
 
 	"github.com/tikv/pd/pkg/cluster"
@@ -66,6 +67,7 @@ import (
 	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/syncer"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/tso"
 	"github.com/tikv/pd/pkg/unsaferecovery"
 	"github.com/tikv/pd/pkg/utils/apiutil"
@@ -187,6 +189,7 @@ type RaftCluster struct {
 	keyRangeManager          *keyrange.Manager
 	regionLabeler            *labeler.RegionLabeler
 	affinityManager          *affinity.Manager
+	tableGroupManager        *tablegroup.Manager
 	replicationMode          *replication.ModeManager
 	unsafeRecoveryController *unsaferecovery.Controller
 	progressManager          *progress.Manager
@@ -408,6 +411,13 @@ func (c *RaftCluster) Start(s Server, bootstrap bool) (err error) {
 	}
 	loadClusterInfoDuration := time.Since(loadClusterInfoStart)
 	log.Info("load cluster info completed", zap.Duration("cost", loadClusterInfoDuration))
+	tableGroupManagerStart := time.Now()
+	c.tableGroupManager, err = tablegroup.NewManager(c.ctx, c.storage, c.id, s.GetKeyspaceManager(), c)
+	if err != nil {
+		log.Warn("Table Group manager creation failed", zap.Error(err), zap.Duration("cost", time.Since(tableGroupManagerStart)))
+		return err
+	}
+	log.Info("Table Group manager created", zap.Duration("cost", time.Since(tableGroupManagerStart)))
 	labelerStart := time.Now()
 	c.regionLabeler, err = labeler.NewRegionLabeler(c.ctx, c.storage, regionLabelGCInterval)
 	labelerDuration := time.Since(labelerStart)
@@ -1092,6 +1102,19 @@ func (c *RaftCluster) GetAffinityManager() *affinity.Manager {
 	return c.affinityManager
 }
 
+// GetTableGroupManager returns the authoritative Table Group manager.
+func (c *RaftCluster) GetTableGroupManager() *tablegroup.Manager {
+	return c.tableGroupManager
+}
+
+// EnsureTableGroupSplitAllowed implements tablegroup.SplitPolicyProvider.
+func (c *RaftCluster) EnsureTableGroupSplitAllowed(region *metapb.Region, source table_grouppb.SplitSource) error {
+	if c.tableGroupManager == nil {
+		return tablegroup.EnsureSplitAllowed(nil, region, source)
+	}
+	return c.tableGroupManager.EnsureTableGroupSplitAllowed(region, source)
+}
+
 // GetStorage returns the storage.
 func (c *RaftCluster) GetStorage() storage.Storage {
 	return c.storage
@@ -1304,6 +1327,11 @@ var syncRunner = ratelimit.NewSyncRunner()
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(ctx *core.MetaProcessContext, region *core.RegionInfo) error {
 	tracer := ctx.Tracer
+	if c.tableGroupManager != nil {
+		if err := c.tableGroupManager.ValidateRegion(ctx, region.GetMeta()); err != nil {
+			return err
+		}
+	}
 	origin, _, err := c.PreCheckPutRegion(region)
 	tracer.OnPreCheckFinished()
 	if err != nil {

@@ -33,6 +33,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/schedulingpb"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
 	"github.com/pingcap/log"
 
 	"github.com/tikv/pd/pkg/cluster"
@@ -42,6 +43,7 @@ import (
 	"github.com/tikv/pd/pkg/mcs/scheduling/server/config"
 	"github.com/tikv/pd/pkg/mcs/scheduling/server/meta"
 	"github.com/tikv/pd/pkg/mcs/scheduling/server/rule"
+	mcstablegroup "github.com/tikv/pd/pkg/mcs/scheduling/server/tablegroup"
 	"github.com/tikv/pd/pkg/ratelimit"
 	"github.com/tikv/pd/pkg/response"
 	"github.com/tikv/pd/pkg/schedule"
@@ -61,6 +63,7 @@ import (
 	"github.com/tikv/pd/pkg/statistics/buckets"
 	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/storage"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
 )
@@ -71,14 +74,15 @@ type Cluster struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	*core.BasicCluster
-	persistConfig   *config.PersistConfig
-	ruleManager     *placement.RuleManager
-	keyRangeManager *keyrange.Manager
-	labelerManager  *labeler.RegionLabeler
-	affinityManager *affinity.Manager
-	regionStats     *statistics.RegionStatistics
-	labelStats      *statistics.LabelStatistics
-	hotStat         *statistics.HotStat
+	persistConfig    *config.PersistConfig
+	ruleManager      *placement.RuleManager
+	keyRangeManager  *keyrange.Manager
+	labelerManager   *labeler.RegionLabeler
+	affinityManager  *affinity.Manager
+	tableGroupPolicy *tablegroup.SplitPolicyRegistry
+	regionStats      *statistics.RegionStatistics
+	labelStats       *statistics.LabelStatistics
+	hotStat          *statistics.HotStat
 	// runtimeMu protects the runtime resources which are created after the cluster is created,
 	// and cleaned up before the cluster is closed.
 	runtimeMu         sync.RWMutex
@@ -88,6 +92,7 @@ type Cluster struct {
 	configWatcher     *config.Watcher
 	ruleWatcher       *rule.Watcher
 	affinityWatcher   *mcsaffinity.Watcher
+	tableGroupWatcher *mcstablegroup.Watcher
 	coordinator       *schedule.Coordinator
 	checkMembershipCh chan struct{}
 	pdLeader          atomic.Value
@@ -152,6 +157,7 @@ func NewCluster(
 		keyRangeManager:   keyrange.NewManager(),
 		labelerManager:    labelerManager,
 		affinityManager:   affinityManager,
+		tableGroupPolicy:  tablegroup.NewSplitPolicyRegistry(),
 		persistConfig:     persistConfig,
 		hotStat:           statistics.NewHotStat(ctx, basicCluster),
 		labelStats:        statistics.NewLabelStatistics(),
@@ -311,12 +317,23 @@ func (c *Cluster) GetMetaWatcher() *meta.Watcher {
 	return c.metaWatcher
 }
 
+// GetTableGroupPolicy returns the read-only watched Table Group policy.
+func (c *Cluster) GetTableGroupPolicy() *tablegroup.SplitPolicyRegistry {
+	return c.tableGroupPolicy
+}
+
+// EnsureTableGroupSplitAllowed implements tablegroup.SplitPolicyProvider.
+func (c *Cluster) EnsureTableGroupSplitAllowed(region *metapb.Region, source table_grouppb.SplitSource) error {
+	return c.tableGroupPolicy.EnsureTableGroupSplitAllowed(region, source)
+}
+
 // SetRuntimeResources installs the cluster-scoped runtime resources after they are created.
 func (c *Cluster) SetRuntimeResources(
 	metaWatcher *meta.Watcher,
 	configWatcher *config.Watcher,
 	ruleWatcher *rule.Watcher,
 	affinityWatcher *mcsaffinity.Watcher,
+	tableGroupWatcher *mcstablegroup.Watcher,
 ) {
 	c.runtimeMu.Lock()
 	defer c.runtimeMu.Unlock()
@@ -324,6 +341,7 @@ func (c *Cluster) SetRuntimeResources(
 	c.configWatcher = configWatcher
 	c.ruleWatcher = ruleWatcher
 	c.affinityWatcher = affinityWatcher
+	c.tableGroupWatcher = tableGroupWatcher
 }
 
 func (c *Cluster) stopCluster() {
@@ -334,12 +352,14 @@ func (c *Cluster) stopCluster() {
 func (c *Cluster) cleanupRuntimeResources() {
 	c.runtimeMu.Lock()
 	affinityWatcher := c.affinityWatcher
+	tableGroupWatcher := c.tableGroupWatcher
 	ruleWatcher := c.ruleWatcher
 	metaWatcher := c.metaWatcher
 	configWatcher := c.configWatcher
 	hbStreams := c.hbStreams
 	storage := c.storage
 	c.affinityWatcher = nil
+	c.tableGroupWatcher = nil
 	c.ruleWatcher = nil
 	c.metaWatcher = nil
 	c.configWatcher = nil
@@ -348,6 +368,9 @@ func (c *Cluster) cleanupRuntimeResources() {
 	c.runtimeMu.Unlock()
 
 	now := time.Now()
+	if tableGroupWatcher != nil {
+		tableGroupWatcher.Close()
+	}
 	if affinityWatcher != nil {
 		affinityWatcher.Close()
 	}

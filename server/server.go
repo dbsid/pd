@@ -47,6 +47,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/resource_manager"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
 	"github.com/pingcap/kvproto/pkg/tsopb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/sysutil"
@@ -326,6 +327,7 @@ func CreateServer(ctx context.Context, cfg *config.Config, services []string, le
 		grpcServer := &GrpcServer{Server: s}
 		pdpb.RegisterPDServer(gs, grpcServer)
 		keyspacepb.RegisterKeyspaceServer(gs, &KeyspaceServer{GrpcServer: grpcServer})
+		table_grouppb.RegisterTableGroupServiceServer(gs, &TableGroupServer{GrpcServer: grpcServer})
 		diagnosticspb.RegisterDiagnosticsServer(gs, s)
 		if !runResourceManager {
 			// resource manager proxy

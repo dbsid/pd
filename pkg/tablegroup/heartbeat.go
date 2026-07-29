@@ -1,0 +1,137 @@
+// Copyright 2026 TiKV Project Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package tablegroup
+
+import (
+	"context"
+
+	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
+
+	"github.com/tikv/pd/pkg/storage/kv"
+)
+
+// ValidateRegion validates and reconciles a Region heartbeat before PD caches it.
+func (m *Manager) ValidateRegion(ctx context.Context, region *metapb.Region) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.RLock()
+	group := m.index.groupForRegion(region)
+	if group == nil {
+		mirrorPresent := region != nil && region.GetTableGroup() != nil
+		m.mu.RUnlock()
+		if mirrorPresent {
+			return regionMismatch(nil, "Region mirror has no Table Group authority")
+		}
+		return nil
+	}
+	err := validateRegionSnapshot(region, group)
+	needsUpdate := err == nil && region.GetTableGroup().GetAppliedMetadataVersion() > group.GetRegionBinding().GetAppliedMetadataVersion()
+	m.mu.RUnlock()
+	if err != nil || !needsUpdate {
+		return err
+	}
+	return m.reconcileRegionProgress(ctx, region)
+}
+
+func validateRegionSnapshot(region *metapb.Region, group *table_grouppb.TableGroup) error {
+	if region == nil {
+		return regionMismatch(group.GetIdentity(), "missing Region heartbeat metadata")
+	}
+	if !regionMatchesGroup(region, group, false) {
+		if region.GetId() == group.GetRegionBinding().GetRegionId() &&
+			region.GetRegionEpoch() != nil && group.GetRegionBinding().GetRegionEpoch() != nil &&
+			(region.GetRegionEpoch().GetVersion() != group.GetRegionBinding().GetRegionEpoch().GetVersion() ||
+				region.GetRegionEpoch().GetConfVer() != group.GetRegionBinding().GetRegionEpoch().GetConfVer()) {
+			return epochMismatch(group.GetIdentity(), "Region epoch differs from Table Group binding")
+		}
+		return regionMismatch(group.GetIdentity(), "Region identity, range, or mirror differs from Table Group authority")
+	}
+	applied := region.GetTableGroup().GetAppliedMetadataVersion()
+	if applied == 0 || applied < group.GetRegionBinding().GetAppliedMetadataVersion() {
+		return staleMetadata(group.GetIdentity(), group.GetRegionBinding().GetAppliedMetadataVersion(), applied)
+	}
+	if applied > group.GetMetadataVersion() {
+		return staleMetadata(group.GetIdentity(), group.GetMetadataVersion(), applied)
+	}
+	return nil
+}
+
+func (m *Manager) reconcileRegionProgress(ctx context.Context, region *metapb.Region) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	group := m.index.groupForRegion(region)
+	if group == nil {
+		return regionMismatch(nil, "Table Group authority disappeared during heartbeat reconcile")
+	}
+	if err := validateRegionSnapshot(region, group); err != nil {
+		return err
+	}
+	applied := region.GetTableGroup().GetAppliedMetadataVersion()
+	if applied <= group.GetRegionBinding().GetAppliedMetadataVersion() {
+		return nil
+	}
+	next := cloneGroup(group)
+	next.RegionBinding.AppliedMetadataVersion = applied
+	next.StatusVersion++
+
+	var token string
+	var currentRecord, nextRecord *operationRecord
+	if group.GetState() == table_grouppb.TableGroupState_TABLE_GROUP_STATE_CREATING && applied == group.GetMetadataVersion() {
+		next.MetadataVersion++
+		next.State = table_grouppb.TableGroupState_TABLE_GROUP_STATE_ACTIVE
+		token = tokenHex(group.GetPendingOperation().GetToken())
+		currentRecord = m.operations[token]
+		if currentRecord == nil || currentRecord.Kind != table_grouppb.TableGroupOperationKind_TABLE_GROUP_OPERATION_KIND_CREATE {
+			return operationConflict(group.GetIdentity(), group.GetPendingOperation().GetToken(), "create operation history is missing")
+		}
+		clonedRecord := *currentRecord
+		clonedRecord.Outcome = operationOutcomeActive
+		nextRecord = &clonedRecord
+		next.PendingOperation = nil
+	}
+
+	var err error
+	if nextRecord != nil {
+		err = m.persistExistingOperation(ctx, group, next, token, currentRecord, nextRecord)
+	} else {
+		err = m.persistStatus(ctx, group, next)
+	}
+	if err != nil {
+		return err
+	}
+	if err := m.index.upsert(next); err != nil {
+		return err
+	}
+	if nextRecord != nil {
+		m.operations[token] = nextRecord
+		tableGroupLifecycleCounter.WithLabelValues("create", "active").Inc()
+	}
+	return nil
+}
+
+func (m *Manager) persistStatus(ctx context.Context, current, next *table_grouppb.TableGroup) error {
+	return m.storage.RunInTxn(ctx, func(txn kv.Txn) error {
+		persisted, err := m.storage.LoadTableGroup(txn, current.GetIdentity().GetTableGroupId())
+		if err != nil {
+			return err
+		}
+		if err := samePersistedGroup(persisted, current); err != nil {
+			return err
+		}
+		return m.storage.SaveTableGroup(txn, next)
+	})
+}

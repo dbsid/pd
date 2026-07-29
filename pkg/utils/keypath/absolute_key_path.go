@@ -135,6 +135,11 @@ const (
 
 	affinityGroupPathFormat = "/pd/%d/affinity_groups/%s" // "/pd/{cluster_id}/affinity_groups/{group_id}"
 
+	tableGroupRecordPathFormat        = "/pd/%d/table_groups/records/%020d"  // "/pd/{cluster_id}/table_groups/records/{group_id}"
+	tableGroupKeyspaceIndexPathFormat = "/pd/%d/table_groups/keyspaces/%08d" // "/pd/{cluster_id}/table_groups/keyspaces/{keyspace_id}"
+	tableGroupRegionIndexPathFormat   = "/pd/%d/table_groups/regions/%020d"  // "/pd/{cluster_id}/table_groups/regions/{region_id}"
+	tableGroupOperationPathFormat     = "/pd/%d/table_groups/operations/%s"  // "/pd/{cluster_id}/table_groups/operations/{token_hex}"
+
 	// meta-service group related paths
 	metaServiceGroupStatusFormat = "/pd/%d/meta_service_groups/%s/status" // "/pd/{cluster_id}/meta_service_groups/{group_id}/status"
 )

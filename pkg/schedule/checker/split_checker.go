@@ -16,6 +16,7 @@ package checker
 
 import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
 	"github.com/pingcap/log"
 
 	"github.com/tikv/pd/pkg/core"
@@ -24,6 +25,7 @@ import (
 	"github.com/tikv/pd/pkg/schedule/labeler"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/placement"
+	"github.com/tikv/pd/pkg/tablegroup"
 )
 
 // SplitChecker splits regions when the key range spans across rule/label boundary.
@@ -70,6 +72,12 @@ func (c *SplitChecker) Check(region *core.RegionInfo) *operator.Operator {
 	}
 
 	if len(keys) == 0 {
+		return nil
+	}
+	policy, _ := c.cluster.(tablegroup.SplitPolicyProvider)
+	if err := tablegroup.EnsureSplitAllowed(policy, region.GetMeta(),
+		table_grouppb.SplitSource_SPLIT_SOURCE_ADMIN_COMMAND); err != nil {
+		log.Debug("Table Group policy rejected split checker", errs.ZapError(err))
 		return nil
 	}
 
