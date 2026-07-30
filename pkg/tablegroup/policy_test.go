@@ -119,7 +119,7 @@ func TestTableGroupSplitPolicyRegistryRejectsStaleOrConflictingSnapshot(t *testi
 }
 
 func TestHashFragmentSplitPolicyIndexesAndValidatesEveryRegion(t *testing.T) {
-	group := validHashFragmentGroup(101, 9)
+	group := validHashFragmentGroup()
 	group.MetadataVersion = 2
 	registry := NewSplitPolicyRegistry()
 	require.NoError(t, registry.Sync(group))

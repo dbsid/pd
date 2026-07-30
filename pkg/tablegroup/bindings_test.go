@@ -31,7 +31,7 @@ func TestFragmentBindingsAcceptLegacyAndNineHashFragments(t *testing.T) {
 	require.Len(t, bindings, 1)
 	require.Equal(t, uint32(0), bindings[0].fragmentID)
 
-	distributed := validHashFragmentGroup(101, 9)
+	distributed := validHashFragmentGroup()
 	bindings, err = fragmentBindingsForGroup(distributed)
 	require.NoError(t, err)
 	require.Len(t, bindings, 9)
@@ -88,7 +88,7 @@ func TestFragmentBindingsRejectNonCanonicalRepresentations(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			group := proto.Clone(validHashFragmentGroup(101, 9)).(*table_grouppb.TableGroup)
+			group := proto.Clone(validHashFragmentGroup()).(*table_grouppb.TableGroup)
 			test.mutate(group)
 			_, err := fragmentBindingsForGroup(group)
 			requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_INVALID_ARGUMENT)
@@ -96,8 +96,9 @@ func TestFragmentBindingsRejectNonCanonicalRepresentations(t *testing.T) {
 	}
 }
 
-func validHashFragmentGroup(groupID uint64, count uint32) *table_grouppb.TableGroup {
-	group := validStoredGroup(groupID, 10)
+func validHashFragmentGroup() *table_grouppb.TableGroup {
+	const count uint32 = 9
+	group := validStoredGroup(101, 10)
 	group.RegionBinding = nil
 	group.Partitioning = &table_grouppb.TableGroupPartitioning{
 		Method:         table_grouppb.TableGroupPartitionMethod_TABLE_GROUP_PARTITION_METHOD_HASH,
@@ -105,7 +106,7 @@ func validHashFragmentGroup(groupID uint64, count uint32) *table_grouppb.TableGr
 		HashAlgorithm:  table_grouppb.TableGroupHashAlgorithm_TABLE_GROUP_HASH_ALGORITHM_MODULO_U64_V1,
 	}
 	group.FragmentBindings = make([]*table_grouppb.TableGroupFragmentBinding, 0, count)
-	for fragmentID := uint32(0); fragmentID < count; fragmentID++ {
+	for fragmentID := range count {
 		group.FragmentBindings = append(group.FragmentBindings, &table_grouppb.TableGroupFragmentBinding{
 			FragmentId: fragmentID,
 			RegionBinding: &table_grouppb.TableGroupRegionBinding{

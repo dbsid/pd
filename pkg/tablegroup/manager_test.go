@@ -232,7 +232,7 @@ func newHashFragmentManagerTestEnv(t *testing.T, count uint32) *managerTestEnv {
 		HashAlgorithm:  table_grouppb.TableGroupHashAlgorithm_TABLE_GROUP_HASH_ALGORITHM_MODULO_U64_V1,
 	}
 	env.request.FragmentBindings = make([]*table_grouppb.TableGroupFragmentBinding, 0, count)
-	for fragmentID := uint32(0); fragmentID < count; fragmentID++ {
+	for fragmentID := range count {
 		startKey := append(bytes.Clone(bound.TxnLeftBound), byte(fragmentID))
 		if fragmentID == 0 {
 			startKey = bytes.Clone(bound.TxnLeftBound)
@@ -331,7 +331,7 @@ func TestHashFragmentTableGroupActivatesOnlyAfterEveryFragmentAndRestarts(t *tes
 	require.Equal(t, uint64(10), unchanged.GetFragmentBindings()[0].GetRegionBinding().GetRegionId())
 	env.request.FragmentBindings[0].RegionBinding.RegionId = 10
 
-	for fragmentID := uint32(0); fragmentID < 8; fragmentID++ {
+	for fragmentID := range uint32(8) {
 		require.NoError(t, env.manager.ValidateRegion(
 			context.Background(),
 			env.fragmentHeartbeat(created, fragmentID, created.GetMetadataVersion()),
@@ -389,7 +389,7 @@ func TestHashFragmentTableGroupRouteTracksLeadersAndRequiresReadySQLStores(t *te
 	env := newHashFragmentManagerTestEnv(t, 9)
 	created, err := env.manager.Create(context.Background(), env.request)
 	require.NoError(t, err)
-	for fragmentID := uint32(0); fragmentID < 9; fragmentID++ {
+	for fragmentID := range uint32(9) {
 		env.validateAndCacheFragment(t, created, fragmentID, created.GetMetadataVersion())
 	}
 	active, err := env.manager.Get(created.GetIdentity())
@@ -397,7 +397,7 @@ func TestHashFragmentTableGroupRouteTracksLeadersAndRequiresReadySQLStores(t *te
 
 	_, err = env.manager.GetRoute(active.GetIdentity())
 	requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_STALE_METADATA_VERSION)
-	for fragmentID := uint32(0); fragmentID < 9; fragmentID++ {
+	for fragmentID := range uint32(9) {
 		current, getErr := env.manager.Get(active.GetIdentity())
 		require.NoError(t, getErr)
 		env.validateAndCacheFragment(t, current, fragmentID, current.GetMetadataVersion())
@@ -789,7 +789,7 @@ func TestTableGroupDuplicatePersistedKeyspaceFailsManagerInitialization(t *testi
 
 func TestTableGroupDuplicatePersistedFragmentRegionFailsManagerInitialization(t *testing.T) {
 	backend := storage.NewStorageWithMemoryBackend()
-	group1 := validHashFragmentGroup(101, 9)
+	group1 := validHashFragmentGroup()
 	group2 := validStoredGroup(102, group1.GetFragmentBindings()[4].GetRegionBinding().GetRegionId())
 	group2.Identity.KeyspaceId = 2
 	err := backend.RunInTxn(context.Background(), func(txn kv.Txn) error {
