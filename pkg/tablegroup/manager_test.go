@@ -165,10 +165,10 @@ func newManagerTestEnv(t *testing.T) *managerTestEnv {
 	allocator := &testAllocator{base: 100}
 	keyspaces := &testKeyspaces{metas: map[uint32]*keyspacepb.KeyspaceMeta{
 		keyspaceID: {
-			Id:     keyspaceID,
-			Name:   "table-group-test",
-			State:  keyspacepb.KeyspaceState_ENABLED,
-			Config: map[string]string{keyspace.RegionBoundType: "txn"},
+			Keyspace: &keyspacepb.KeyspaceMeta_Id{Id: keyspaceID},
+			Name:     "table-group-test",
+			State:    keyspacepb.KeyspaceState_ENABLED,
+			Config:   map[string]string{keyspace.RegionBoundType: "txn"},
 		},
 	}}
 	regions := &testRegions{regions: map[uint64]*core.RegionInfo{region.GetId(): regionInfo}}
