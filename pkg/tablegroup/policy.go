@@ -51,20 +51,33 @@ func (p *policyIndex) upsert(group *table_grouppb.TableGroup) error {
 	if err := validateStoredGroup(group); err != nil {
 		return err
 	}
+	bindings, err := fragmentBindingsForGroup(group)
+	if err != nil {
+		return err
+	}
 	groupID := group.GetIdentity().GetTableGroupId()
 	previous := p.groups[groupID]
 	if previous != nil && previous.GetIdentity().GetKeyspaceId() != group.GetIdentity().GetKeyspaceId() {
 		return operationConflict(group.GetIdentity(), nil, "Table Group keyspace identity cannot change")
 	}
-	regionID := group.GetRegionBinding().GetRegionId()
-	if existingGroupID, ok := p.regions[regionID]; ok && existingGroupID != groupID {
-		return alreadyExists("Region is already bound to another Table Group", group.GetIdentity())
+	for _, fragment := range bindings {
+		if existingGroupID, ok := p.regions[fragment.binding.GetRegionId()]; ok && existingGroupID != groupID {
+			return alreadyExists("Region is already bound to another Table Group", group.GetIdentity())
+		}
 	}
-	if previous != nil && previous.GetRegionBinding().GetRegionId() != regionID {
-		delete(p.regions, previous.GetRegionBinding().GetRegionId())
+	if previous != nil {
+		previousBindings, err := fragmentBindingsForGroup(previous)
+		if err != nil {
+			return err
+		}
+		for _, fragment := range previousBindings {
+			delete(p.regions, fragment.binding.GetRegionId())
+		}
 	}
 	p.groups[groupID] = cloneGroup(group)
-	p.regions[regionID] = groupID
+	for _, fragment := range bindings {
+		p.regions[fragment.binding.GetRegionId()] = groupID
+	}
 	if previous == nil {
 		p.rebuildRanges()
 	}
@@ -76,7 +89,13 @@ func (p *policyIndex) remove(groupID uint64) {
 	if group == nil {
 		return
 	}
-	delete(p.regions, group.GetRegionBinding().GetRegionId())
+	bindings, err := fragmentBindingsForGroup(group)
+	if err != nil {
+		return
+	}
+	for _, fragment := range bindings {
+		delete(p.regions, fragment.binding.GetRegionId())
+	}
 	delete(p.groups, groupID)
 	p.rebuildRanges()
 }
@@ -157,24 +176,31 @@ func ensureMirrorSplitAllowed(region *metapb.Region, source table_grouppb.SplitS
 }
 
 func regionMatchesGroup(region *metapb.Region, group *table_grouppb.TableGroup, requireAppliedVersion bool) bool {
-	if region == nil || group == nil || group.GetIdentity() == nil || group.GetRegionBinding() == nil {
+	if region == nil || group == nil || group.GetIdentity() == nil {
 		return false
 	}
-	binding := group.GetRegionBinding()
-	if region.GetId() != binding.GetRegionId() || !proto.Equal(region.GetRegionEpoch(), binding.GetRegionEpoch()) {
+	fragment, ok := findFragmentBinding(group, region.GetId())
+	if !ok || !proto.Equal(region.GetRegionEpoch(), fragment.binding.GetRegionEpoch()) {
 		return false
 	}
 	bound := keyspace.MakeRegionBound(group.GetIdentity().GetKeyspaceId())
-	if !bytes.Equal(region.GetStartKey(), bound.TxnLeftBound) || !bytes.Equal(region.GetEndKey(), bound.TxnRightBound) {
+	if group.GetPartitioning() == nil {
+		if !bytes.Equal(region.GetStartKey(), bound.TxnLeftBound) || !bytes.Equal(region.GetEndKey(), bound.TxnRightBound) {
+			return false
+		}
+	} else if bytes.Compare(region.GetStartKey(), bound.TxnLeftBound) < 0 ||
+		bytes.Compare(region.GetEndKey(), bound.TxnRightBound) > 0 ||
+		bytes.Compare(region.GetStartKey(), region.GetEndKey()) >= 0 {
 		return false
 	}
 	mirror := region.GetTableGroup()
 	if mirror == nil || mirror.GetKeyspaceId() != group.GetIdentity().GetKeyspaceId() ||
-		mirror.GetTableGroupId() != group.GetIdentity().GetTableGroupId() {
+		mirror.GetTableGroupId() != group.GetIdentity().GetTableGroupId() ||
+		mirror.GetFragmentId() != fragment.fragmentID {
 		return false
 	}
 	if requireAppliedVersion && (mirror.GetAppliedMetadataVersion() == 0 ||
-		mirror.GetAppliedMetadataVersion() < binding.GetAppliedMetadataVersion() ||
+		mirror.GetAppliedMetadataVersion() < fragment.binding.GetAppliedMetadataVersion() ||
 		mirror.GetAppliedMetadataVersion() > group.GetMetadataVersion()) {
 		return false
 	}
@@ -249,14 +275,35 @@ func equalMetadataSpec(left, right *table_grouppb.TableGroup) bool {
 	rightSpec.StatusVersion = 0
 	leftSpec.CapacityStatus = nil
 	rightSpec.CapacityStatus = nil
-	leftSpec.RegionBinding.AppliedMetadataVersion = 0
-	rightSpec.RegionBinding.AppliedMetadataVersion = 0
+	clearAppliedMetadataVersions(leftSpec)
+	clearAppliedMetadataVersions(rightSpec)
 	return proto.Equal(leftSpec, rightSpec)
 }
 
 func equalObservedStatus(left, right *table_grouppb.TableGroup) bool {
-	return left.GetRegionBinding().GetAppliedMetadataVersion() == right.GetRegionBinding().GetAppliedMetadataVersion() &&
-		proto.Equal(left.GetCapacityStatus(), right.GetCapacityStatus())
+	leftBindings, leftErr := fragmentBindingsForGroup(left)
+	rightBindings, rightErr := fragmentBindingsForGroup(right)
+	if leftErr != nil || rightErr != nil || len(leftBindings) != len(rightBindings) {
+		return false
+	}
+	for index := range leftBindings {
+		if leftBindings[index].fragmentID != rightBindings[index].fragmentID ||
+			leftBindings[index].binding.GetAppliedMetadataVersion() != rightBindings[index].binding.GetAppliedMetadataVersion() {
+			return false
+		}
+	}
+	return proto.Equal(left.GetCapacityStatus(), right.GetCapacityStatus())
+}
+
+func clearAppliedMetadataVersions(group *table_grouppb.TableGroup) {
+	if group.GetRegionBinding() != nil {
+		group.RegionBinding.AppliedMetadataVersion = 0
+	}
+	for _, fragment := range group.GetFragmentBindings() {
+		if fragment.GetRegionBinding() != nil {
+			fragment.RegionBinding.AppliedMetadataVersion = 0
+		}
+	}
 }
 
 // Remove deletes one group from the read-only registry.

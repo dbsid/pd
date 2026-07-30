@@ -117,3 +117,54 @@ func TestTableGroupSplitPolicyRegistryRejectsStaleOrConflictingSnapshot(t *testi
 	requireErrorCode(t, registry.Sync(metadataUpdate),
 		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_OPERATION_CONFLICT)
 }
+
+func TestHashFragmentSplitPolicyIndexesAndValidatesEveryRegion(t *testing.T) {
+	group := validHashFragmentGroup(101, 9)
+	group.MetadataVersion = 2
+	registry := NewSplitPolicyRegistry()
+	require.NoError(t, registry.Sync(group))
+	require.Len(t, registry.index.regions, 9)
+
+	bound := keyspace.MakeRegionBound(group.GetIdentity().GetKeyspaceId())
+	regions := make([]*metapb.Region, 0, 9)
+	for fragmentID, fragment := range group.GetFragmentBindings() {
+		startKey := append(bytes.Clone(bound.TxnLeftBound), byte(fragmentID))
+		if fragmentID == 0 {
+			startKey = bytes.Clone(bound.TxnLeftBound)
+		}
+		endKey := append(bytes.Clone(bound.TxnLeftBound), byte(fragmentID+1))
+		if fragmentID+1 == len(group.GetFragmentBindings()) {
+			endKey = bytes.Clone(bound.TxnRightBound)
+		}
+		region := &metapb.Region{
+			Id:          fragment.GetRegionBinding().GetRegionId(),
+			StartKey:    startKey,
+			EndKey:      endKey,
+			RegionEpoch: proto.Clone(fragment.GetRegionBinding().GetRegionEpoch()).(*metapb.RegionEpoch),
+			TableGroup: &metapb.TableGroupRegionMeta{
+				KeyspaceId:             group.GetIdentity().GetKeyspaceId(),
+				TableGroupId:           group.GetIdentity().GetTableGroupId(),
+				AppliedMetadataVersion: fragment.GetRegionBinding().GetAppliedMetadataVersion(),
+				FragmentId:             uint32(fragmentID),
+			},
+		}
+		regions = append(regions, region)
+		require.NoError(t, registry.ValidateRegion(region))
+		requireErrorCode(t, registry.EnsureTableGroupSplitAllowed(
+			region,
+			table_grouppb.SplitSource_SPLIT_SOURCE_AUTOMATIC_SIZE,
+		), table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_SPLIT_FORBIDDEN)
+	}
+
+	wrongFragment := proto.Clone(regions[4]).(*metapb.Region)
+	wrongFragment.TableGroup.FragmentId = 5
+	requireErrorCode(t, registry.ValidateRegion(wrongFragment),
+		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_REGION_MISMATCH)
+
+	statusUpdate := cloneGroup(group)
+	statusUpdate.StatusVersion++
+	statusUpdate.FragmentBindings[4].RegionBinding.AppliedMetadataVersion = group.GetMetadataVersion()
+	require.NoError(t, registry.Sync(statusUpdate))
+	require.Equal(t, group.GetMetadataVersion(),
+		registry.index.groups[group.GetIdentity().GetTableGroupId()].GetFragmentBindings()[4].GetRegionBinding().GetAppliedMetadataVersion())
+}

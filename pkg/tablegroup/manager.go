@@ -44,6 +44,7 @@ type KeyspaceProvider interface {
 type RegionProvider interface {
 	GetRegion(regionID uint64) *core.RegionInfo
 	GetRegionByKey(regionKey []byte) *core.RegionInfo
+	GetStore(storeID uint64) *core.StoreInfo
 }
 
 // Manager is the sole writable authority for Table Group metadata.
@@ -122,12 +123,18 @@ func (m *Manager) initialize(ctx context.Context) error {
 			if !ok || indexedGroupID != groupID {
 				return invalidArgument("persisted Table Group keyspace index conflicts with record")
 			}
-			indexedGroupID, ok, err = m.storage.LoadTableGroupRegionIndex(txn, group.GetRegionBinding().GetRegionId())
+			bindings, err := fragmentBindingsForGroup(group)
 			if err != nil {
 				return err
 			}
-			if !ok || indexedGroupID != groupID {
-				return invalidArgument("persisted Table Group Region index conflicts with record")
+			for _, fragment := range bindings {
+				indexedGroupID, ok, err = m.storage.LoadTableGroupRegionIndex(txn, fragment.binding.GetRegionId())
+				if err != nil {
+					return err
+				}
+				if !ok || indexedGroupID != groupID {
+					return invalidArgument("persisted Table Group Region index conflicts with record")
+				}
 			}
 			return nil
 		})
@@ -186,7 +193,7 @@ func (m *Manager) Create(ctx context.Context, request *table_grouppb.CreateTable
 	}
 	m.mu.RUnlock()
 
-	region, err := m.validateCreateTarget(request)
+	regions, err := m.validateCreateTargets(request)
 	if err != nil {
 		tableGroupLifecycleCounter.WithLabelValues("create", "invalid").Inc()
 		return nil, err
@@ -206,8 +213,10 @@ func (m *Manager) Create(ctx context.Context, request *table_grouppb.CreateTable
 	if existingGroupID, ok := m.byKeyspace[request.GetKeyspaceId()]; ok {
 		return nil, alreadyExists(fmt.Sprintf("keyspace is already bound to Table Group %d", existingGroupID), identity)
 	}
-	if existingGroupID, ok := m.index.regions[region.GetID()]; ok {
-		return nil, alreadyExists(fmt.Sprintf("Region is already bound to Table Group %d", existingGroupID), identity)
+	for _, region := range regions {
+		if existingGroupID, ok := m.index.regions[region.GetID()]; ok {
+			return nil, alreadyExists(fmt.Sprintf("Region is already bound to Table Group %d", existingGroupID), identity)
+		}
 	}
 
 	groupID := requestedGroupID
@@ -242,11 +251,16 @@ func (m *Manager) Create(ctx context.Context, request *table_grouppb.CreateTable
 			BaseMetadataVersion:   0,
 			TargetMetadataVersion: 1,
 		},
-		RegionBinding:   proto.Clone(request.GetRegionBinding()).(*table_grouppb.TableGroupRegionBinding),
 		SplitPolicy:     proto.Clone(request.GetSplitPolicy()).(*table_grouppb.SplitPolicy),
 		CapacityBudget:  proto.Clone(request.GetCapacityBudget()).(*table_grouppb.CapacityBudget),
 		CapacityStatus:  &table_grouppb.CapacityStatus{State: table_grouppb.CapacityState_CAPACITY_STATE_UNKNOWN},
 		PlacementIntent: proto.Clone(request.GetPlacementIntent()).(*table_grouppb.PlacementIntent),
+	}
+	if request.GetRegionBinding() != nil {
+		group.RegionBinding = proto.Clone(request.GetRegionBinding()).(*table_grouppb.TableGroupRegionBinding)
+	} else {
+		group.Partitioning = proto.Clone(request.GetPartitioning()).(*table_grouppb.TableGroupPartitioning)
+		group.FragmentBindings = cloneFragmentBindings(request.GetFragmentBindings())
 	}
 	record := &operationRecord{
 		SchemaVersion:         operationRecordSchemaVersion,
@@ -279,10 +293,12 @@ func (m *Manager) Create(ctx context.Context, request *table_grouppb.CreateTable
 		} else if ok {
 			return alreadyExists(fmt.Sprintf("keyspace is already bound to Table Group %d", indexedGroupID), identity)
 		}
-		if indexedGroupID, ok, err := m.storage.LoadTableGroupRegionIndex(txn, region.GetID()); err != nil {
-			return err
-		} else if ok {
-			return alreadyExists(fmt.Sprintf("Region is already bound to Table Group %d", indexedGroupID), identity)
+		for _, region := range regions {
+			if indexedGroupID, ok, err := m.storage.LoadTableGroupRegionIndex(txn, region.GetID()); err != nil {
+				return err
+			} else if ok {
+				return alreadyExists(fmt.Sprintf("Region is already bound to Table Group %d", indexedGroupID), identity)
+			}
 		}
 		if err := m.storage.SaveTableGroup(txn, group); err != nil {
 			return err
@@ -290,8 +306,10 @@ func (m *Manager) Create(ctx context.Context, request *table_grouppb.CreateTable
 		if err := m.storage.SaveTableGroupKeyspaceIndex(txn, request.GetKeyspaceId(), groupID); err != nil {
 			return err
 		}
-		if err := m.storage.SaveTableGroupRegionIndex(txn, region.GetID(), groupID); err != nil {
-			return err
+		for _, region := range regions {
+			if err := m.storage.SaveTableGroupRegionIndex(txn, region.GetID(), groupID); err != nil {
+				return err
+			}
 		}
 		return m.storage.SaveTableGroupOperation(txn, token, recordValue)
 	})
@@ -308,7 +326,7 @@ func (m *Manager) Create(ctx context.Context, request *table_grouppb.CreateTable
 	return cloneGroup(group), nil
 }
 
-func (m *Manager) validateCreateTarget(request *table_grouppb.CreateTableGroupRequest) (*core.RegionInfo, error) {
+func (m *Manager) validateCreateTargets(request *table_grouppb.CreateTableGroupRequest) ([]*core.RegionInfo, error) {
 	if request.GetKeyspaceId() == keyspace.GetBootstrapKeyspaceID() {
 		return nil, keyspaceMismatch(nil, "bootstrap keyspace cannot become a Milestone-1 Table Group")
 	}
@@ -323,24 +341,41 @@ func (m *Manager) validateCreateTarget(request *table_grouppb.CreateTableGroupRe
 		return nil, keyspaceMismatch(nil, "Table Group keyspace must use transactional Region bounds")
 	}
 	bound := keyspace.MakeRegionBound(request.GetKeyspaceId())
-	region := m.regions.GetRegionByKey(bound.TxnLeftBound)
-	if region == nil || region.GetID() != request.GetRegionBinding().GetRegionId() ||
-		!bytes.Equal(region.GetStartKey(), bound.TxnLeftBound) || !bytes.Equal(region.GetEndKey(), bound.TxnRightBound) {
-		return nil, regionMismatch(nil, "keyspace is not owned by the requested single exact Region")
+	bindings, err := fragmentBindingsForCreate(request)
+	if err != nil {
+		return nil, err
 	}
-	if current := m.regions.GetRegion(region.GetID()); current == nil || current.GetID() != region.GetID() {
-		return nil, regionMismatch(nil, "requested Region is unavailable")
+	regions := make([]*core.RegionInfo, 0, len(bindings))
+	for index, fragment := range bindings {
+		region := m.regions.GetRegion(fragment.binding.GetRegionId())
+		if region == nil || region.GetID() != fragment.binding.GetRegionId() {
+			return nil, regionMismatch(nil, "requested Table Group fragment Region is unavailable")
+		}
+		if byKey := m.regions.GetRegionByKey(region.GetStartKey()); byKey == nil || byKey.GetID() != region.GetID() {
+			return nil, regionMismatch(nil, "requested Table Group fragment is not the current key-range owner")
+		}
+		if !proto.Equal(region.GetRegionEpoch(), fragment.binding.GetRegionEpoch()) {
+			return nil, epochMismatch(nil, "requested Table Group fragment Region epoch is stale")
+		}
+		if len(region.GetPeers()) == 0 || region.GetLeader() == nil {
+			return nil, regionMismatch(nil, "requested Table Group fragment Region is not eligible")
+		}
+		if region.GetMeta().GetTableGroup() != nil {
+			return nil, regionMismatch(nil, "requested Table Group fragment Region already contains a mirror")
+		}
+		if index == 0 {
+			if !bytes.Equal(region.GetStartKey(), bound.TxnLeftBound) {
+				return nil, regionMismatch(nil, "Table Group fragments do not start at the transactional keyspace bound")
+			}
+		} else if !bytes.Equal(regions[index-1].GetEndKey(), region.GetStartKey()) {
+			return nil, regionMismatch(nil, "Table Group fragment Regions are not contiguous")
+		}
+		regions = append(regions, region)
 	}
-	if !proto.Equal(region.GetRegionEpoch(), request.GetRegionBinding().GetRegionEpoch()) {
-		return nil, epochMismatch(nil, "requested Region epoch is stale")
+	if !bytes.Equal(regions[len(regions)-1].GetEndKey(), bound.TxnRightBound) {
+		return nil, regionMismatch(nil, "Table Group fragments do not end at the transactional keyspace bound")
 	}
-	if len(region.GetPeers()) == 0 || region.GetLeader() == nil {
-		return nil, regionMismatch(nil, "requested Region is not eligible")
-	}
-	if region.GetMeta().GetTableGroup() != nil {
-		return nil, regionMismatch(nil, "requested Region already contains a Table Group mirror")
-	}
-	return region, nil
+	return regions, nil
 }
 
 // Get returns the current snapshot for a complete identity.

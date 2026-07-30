@@ -101,6 +101,7 @@ func (k *testKeyspaces) LoadKeyspaceByID(id uint32) (*keyspacepb.KeyspaceMeta, e
 
 type testRegions struct {
 	regions map[uint64]*core.RegionInfo
+	stores  map[uint64]*core.StoreInfo
 }
 
 func (r *testRegions) GetRegion(id uint64) *core.RegionInfo {
@@ -115,6 +116,10 @@ func (r *testRegions) GetRegionByKey(key []byte) *core.RegionInfo {
 		}
 	}
 	return nil
+}
+
+func (r *testRegions) GetStore(id uint64) *core.StoreInfo {
+	return r.stores[id]
 }
 
 type countingStorage struct {
@@ -146,6 +151,7 @@ type managerTestEnv struct {
 	manager   *Manager
 	request   *table_grouppb.CreateTableGroupRequest
 	region    *metapb.Region
+	fragments []*metapb.Region
 }
 
 func newManagerTestEnv(t *testing.T) *managerTestEnv {
@@ -171,7 +177,12 @@ func newManagerTestEnv(t *testing.T) *managerTestEnv {
 			Config:   map[string]string{keyspace.RegionBoundType: "txn"},
 		},
 	}}
-	regions := &testRegions{regions: map[uint64]*core.RegionInfo{region.GetId(): regionInfo}}
+	regions := &testRegions{
+		regions: map[uint64]*core.RegionInfo{region.GetId(): regionInfo},
+		stores: map[uint64]*core.StoreInfo{
+			1: core.NewStoreInfo(&metapb.Store{Id: 1, NodeState: metapb.NodeState_Serving, SqlAddress: "127.0.0.1:4000"}),
+		},
+	}
 	manager, err := NewManager(context.Background(), backend, allocator, keyspaces, regions)
 	require.NoError(t, err)
 	return &managerTestEnv{
@@ -208,6 +219,63 @@ func newCreateRequest(keyspaceID uint32, region *metapb.Region, token []byte) *t
 	}
 }
 
+func newHashFragmentManagerTestEnv(t *testing.T, count uint32) *managerTestEnv {
+	t.Helper()
+	env := newManagerTestEnv(t)
+	bound := keyspace.MakeRegionBound(env.request.GetKeyspaceId())
+	env.regions.regions = make(map[uint64]*core.RegionInfo, count)
+	env.fragments = make([]*metapb.Region, 0, count)
+	env.request.RegionBinding = nil
+	env.request.Partitioning = &table_grouppb.TableGroupPartitioning{
+		Method:         table_grouppb.TableGroupPartitionMethod_TABLE_GROUP_PARTITION_METHOD_HASH,
+		PartitionCount: count,
+		HashAlgorithm:  table_grouppb.TableGroupHashAlgorithm_TABLE_GROUP_HASH_ALGORITHM_MODULO_U64_V1,
+	}
+	env.request.FragmentBindings = make([]*table_grouppb.TableGroupFragmentBinding, 0, count)
+	for fragmentID := uint32(0); fragmentID < count; fragmentID++ {
+		startKey := append(bytes.Clone(bound.TxnLeftBound), byte(fragmentID))
+		if fragmentID == 0 {
+			startKey = bytes.Clone(bound.TxnLeftBound)
+		}
+		endKey := append(bytes.Clone(bound.TxnLeftBound), byte(fragmentID+1))
+		if fragmentID+1 == count {
+			endKey = bytes.Clone(bound.TxnRightBound)
+		}
+		regionID := uint64(10 + fragmentID)
+		peers := []*metapb.Peer{
+			{Id: uint64(1000 + fragmentID*10), StoreId: 1},
+			{Id: uint64(1001 + fragmentID*10), StoreId: 2},
+			{Id: uint64(1002 + fragmentID*10), StoreId: 3},
+		}
+		leader := peers[fragmentID%3]
+		region := &metapb.Region{
+			Id:          regionID,
+			StartKey:    startKey,
+			EndKey:      endKey,
+			RegionEpoch: &metapb.RegionEpoch{Version: 1, ConfVer: 1},
+			Peers:       peers,
+		}
+		env.fragments = append(env.fragments, region)
+		env.regions.regions[regionID] = core.NewRegionInfo(region, leader)
+		env.request.FragmentBindings = append(env.request.FragmentBindings, &table_grouppb.TableGroupFragmentBinding{
+			FragmentId: fragmentID,
+			RegionBinding: &table_grouppb.TableGroupRegionBinding{
+				RegionId:    regionID,
+				RegionEpoch: proto.Clone(region.GetRegionEpoch()).(*metapb.RegionEpoch),
+				ShardId:     uint64(20 + fragmentID),
+			},
+		})
+	}
+	env.request.PlacementIntent.ReplicaCount = 3
+	env.regions.stores = map[uint64]*core.StoreInfo{
+		1: core.NewStoreInfo(&metapb.Store{Id: 1, NodeState: metapb.NodeState_Serving, SqlAddress: "10.0.0.1:4000"}),
+		2: core.NewStoreInfo(&metapb.Store{Id: 2, NodeState: metapb.NodeState_Serving, SqlAddress: "10.0.0.2:4000"}),
+		3: core.NewStoreInfo(&metapb.Store{Id: 3, NodeState: metapb.NodeState_Serving, SqlAddress: "10.0.0.3:4000"}),
+	}
+	env.region = env.fragments[0]
+	return env
+}
+
 func (e *managerTestEnv) heartbeat(group *table_grouppb.TableGroup, appliedVersion uint64) *metapb.Region {
 	region := proto.Clone(e.region).(*metapb.Region)
 	region.TableGroup = &metapb.TableGroupRegionMeta{
@@ -216,6 +284,180 @@ func (e *managerTestEnv) heartbeat(group *table_grouppb.TableGroup, appliedVersi
 		AppliedMetadataVersion: appliedVersion,
 	}
 	return region
+}
+
+func (e *managerTestEnv) fragmentHeartbeat(
+	group *table_grouppb.TableGroup,
+	fragmentID uint32,
+	appliedVersion uint64,
+) *metapb.Region {
+	region := proto.Clone(e.fragments[fragmentID]).(*metapb.Region)
+	region.TableGroup = &metapb.TableGroupRegionMeta{
+		KeyspaceId:             group.GetIdentity().GetKeyspaceId(),
+		TableGroupId:           group.GetIdentity().GetTableGroupId(),
+		AppliedMetadataVersion: appliedVersion,
+		FragmentId:             fragmentID,
+	}
+	return region
+}
+
+func (e *managerTestEnv) validateAndCacheFragment(
+	t *testing.T,
+	group *table_grouppb.TableGroup,
+	fragmentID uint32,
+	appliedVersion uint64,
+) {
+	t.Helper()
+	heartbeat := e.fragmentHeartbeat(group, fragmentID, appliedVersion)
+	current := e.regions.GetRegion(heartbeat.GetId())
+	require.NotNil(t, current)
+	leader := current.GetLeader()
+	require.NoError(t, e.manager.ValidateRegion(context.Background(), heartbeat))
+	e.regions.regions[heartbeat.GetId()] = core.NewRegionInfo(heartbeat, leader)
+}
+
+func TestHashFragmentTableGroupActivatesOnlyAfterEveryFragmentAndRestarts(t *testing.T) {
+	env := newHashFragmentManagerTestEnv(t, 9)
+	created, err := env.manager.Create(context.Background(), env.request)
+	require.NoError(t, err)
+	require.Equal(t, table_grouppb.TableGroupState_TABLE_GROUP_STATE_CREATING, created.GetState())
+	require.Nil(t, created.GetRegionBinding())
+	require.Len(t, created.GetFragmentBindings(), 9)
+
+	// The authority snapshot must not retain request-owned protobuf pointers.
+	env.request.FragmentBindings[0].RegionBinding.RegionId = 999
+	unchanged, err := env.manager.Get(created.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, uint64(10), unchanged.GetFragmentBindings()[0].GetRegionBinding().GetRegionId())
+	env.request.FragmentBindings[0].RegionBinding.RegionId = 10
+
+	for fragmentID := uint32(0); fragmentID < 8; fragmentID++ {
+		require.NoError(t, env.manager.ValidateRegion(
+			context.Background(),
+			env.fragmentHeartbeat(created, fragmentID, created.GetMetadataVersion()),
+		))
+		current, getErr := env.manager.Get(created.GetIdentity())
+		require.NoError(t, getErr)
+		require.Equal(t, table_grouppb.TableGroupState_TABLE_GROUP_STATE_CREATING, current.GetState())
+		require.Equal(t, created.GetMetadataVersion(),
+			current.GetFragmentBindings()[fragmentID].GetRegionBinding().GetAppliedMetadataVersion())
+	}
+
+	require.NoError(t, env.manager.ValidateRegion(
+		context.Background(),
+		env.fragmentHeartbeat(created, 8, created.GetMetadataVersion()),
+	))
+	active, err := env.manager.Get(created.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, table_grouppb.TableGroupState_TABLE_GROUP_STATE_ACTIVE, active.GetState())
+	require.Equal(t, uint64(2), active.GetMetadataVersion())
+	for fragmentID, fragment := range active.GetFragmentBindings() {
+		require.Equal(t, uint32(fragmentID), fragment.GetFragmentId())
+		require.Equal(t, uint64(1), fragment.GetRegionBinding().GetAppliedMetadataVersion())
+		discovered, getErr := env.manager.GetByRegion(
+			active.GetIdentity().GetKeyspaceId(),
+			fragment.GetRegionBinding().GetRegionId(),
+		)
+		require.NoError(t, getErr)
+		require.True(t, proto.Equal(active, discovered))
+	}
+
+	restarted, err := NewManager(context.Background(), env.storage, env.allocator, env.keyspaces, env.regions)
+	require.NoError(t, err)
+	for _, fragment := range active.GetFragmentBindings() {
+		discovered, getErr := restarted.GetByRegion(
+			active.GetIdentity().GetKeyspaceId(),
+			fragment.GetRegionBinding().GetRegionId(),
+		)
+		require.NoError(t, getErr)
+		require.True(t, proto.Equal(active, discovered))
+	}
+}
+
+func TestHashFragmentTableGroupRejectsNonContiguousRegions(t *testing.T) {
+	env := newHashFragmentManagerTestEnv(t, 9)
+	region := proto.Clone(env.fragments[4]).(*metapb.Region)
+	region.StartKey = append(region.StartKey, 0)
+	env.fragments[4] = region
+	env.regions.regions[region.GetId()] = core.NewRegionInfo(region, region.GetPeers()[0])
+
+	_, err := env.manager.Create(context.Background(), env.request)
+	requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_REGION_MISMATCH)
+}
+
+func TestHashFragmentTableGroupRouteTracksLeadersAndRequiresReadySQLStores(t *testing.T) {
+	env := newHashFragmentManagerTestEnv(t, 9)
+	created, err := env.manager.Create(context.Background(), env.request)
+	require.NoError(t, err)
+	for fragmentID := uint32(0); fragmentID < 9; fragmentID++ {
+		env.validateAndCacheFragment(t, created, fragmentID, created.GetMetadataVersion())
+	}
+	active, err := env.manager.Get(created.GetIdentity())
+	require.NoError(t, err)
+
+	_, err = env.manager.GetRoute(active.GetIdentity())
+	requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_STALE_METADATA_VERSION)
+	for fragmentID := uint32(0); fragmentID < 9; fragmentID++ {
+		current, getErr := env.manager.Get(active.GetIdentity())
+		require.NoError(t, getErr)
+		env.validateAndCacheFragment(t, current, fragmentID, current.GetMetadataVersion())
+	}
+
+	route, err := env.manager.GetRoute(active.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, table_grouppb.TableGroupPartitionMethod_TABLE_GROUP_PARTITION_METHOD_HASH,
+		route.GetPartitioning().GetMethod())
+	require.Equal(t, uint32(9), route.GetPartitioning().GetPartitionCount())
+	require.Len(t, route.GetFragmentRoutes(), 9)
+	leaders := make(map[uint64]int)
+	for fragmentID, fragmentRoute := range route.GetFragmentRoutes() {
+		require.Equal(t, uint32(fragmentID), fragmentRoute.GetFragmentId())
+		require.NotEmpty(t, fragmentRoute.GetLeaderSqlAddress())
+		require.Equal(t, route.GetMetadataVersion(), fragmentRoute.GetRegionBinding().GetAppliedMetadataVersion())
+		leaders[fragmentRoute.GetLeaderStoreId()]++
+	}
+	require.Equal(t, map[uint64]int{1: 3, 2: 3, 3: 3}, leaders)
+
+	route.FragmentRoutes[0].LeaderSqlAddress = "mutated"
+	unchanged, err := env.manager.GetRoute(active.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.1:4000", unchanged.GetFragmentRoutes()[0].GetLeaderSqlAddress())
+
+	fragmentZero := env.regions.GetRegion(10)
+	regionMeta := proto.Clone(fragmentZero.GetMeta()).(*metapb.Region)
+	env.regions.regions[10] = core.NewRegionInfo(regionMeta, regionMeta.GetPeers()[1])
+	transferred, err := env.manager.GetRoute(active.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), transferred.GetFragmentRoutes()[0].GetLeaderStoreId())
+	require.Equal(t, "10.0.0.2:4000", transferred.GetFragmentRoutes()[0].GetLeaderSqlAddress())
+
+	storeMeta := proto.Clone(env.regions.GetStore(2).GetMeta()).(*metapb.Store)
+	storeMeta.SqlAddress = ""
+	env.regions.stores[2] = core.NewStoreInfo(storeMeta)
+	_, err = env.manager.GetRoute(active.GetIdentity())
+	requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_REGION_MISMATCH)
+}
+
+func TestLegacyTableGroupRouteNormalizesSinglePartition(t *testing.T) {
+	env := newManagerTestEnv(t)
+	created, err := env.manager.Create(context.Background(), env.request)
+	require.NoError(t, err)
+	heartbeat := env.heartbeat(created, created.GetMetadataVersion())
+	require.NoError(t, env.manager.ValidateRegion(context.Background(), heartbeat))
+	env.regions.regions[heartbeat.GetId()] = core.NewRegionInfo(heartbeat, heartbeat.GetPeers()[0])
+	active, err := env.manager.Get(created.GetIdentity())
+	require.NoError(t, err)
+	heartbeat = env.heartbeat(active, active.GetMetadataVersion())
+	require.NoError(t, env.manager.ValidateRegion(context.Background(), heartbeat))
+	env.regions.regions[heartbeat.GetId()] = core.NewRegionInfo(heartbeat, heartbeat.GetPeers()[0])
+
+	route, err := env.manager.GetRoute(active.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, table_grouppb.TableGroupPartitionMethod_TABLE_GROUP_PARTITION_METHOD_SINGLE,
+		route.GetPartitioning().GetMethod())
+	require.Equal(t, uint32(1), route.GetPartitioning().GetPartitionCount())
+	require.Len(t, route.GetFragmentRoutes(), 1)
+	require.Equal(t, uint32(0), route.GetFragmentRoutes()[0].GetFragmentId())
 }
 
 func (e *managerTestEnv) createAndActivate(t *testing.T) *table_grouppb.TableGroup {
@@ -541,6 +783,23 @@ func TestTableGroupDuplicatePersistedKeyspaceFailsManagerInitialization(t *testi
 		return backend.SaveTableGroup(txn, group2)
 	})
 	require.NoError(t, err)
+	_, err = NewManager(context.Background(), backend, &testAllocator{}, &testKeyspaces{}, &testRegions{})
+	requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_ALREADY_EXISTS)
+}
+
+func TestTableGroupDuplicatePersistedFragmentRegionFailsManagerInitialization(t *testing.T) {
+	backend := storage.NewStorageWithMemoryBackend()
+	group1 := validHashFragmentGroup(101, 9)
+	group2 := validStoredGroup(102, group1.GetFragmentBindings()[4].GetRegionBinding().GetRegionId())
+	group2.Identity.KeyspaceId = 2
+	err := backend.RunInTxn(context.Background(), func(txn kv.Txn) error {
+		if err := backend.SaveTableGroup(txn, group1); err != nil {
+			return err
+		}
+		return backend.SaveTableGroup(txn, group2)
+	})
+	require.NoError(t, err)
+
 	_, err = NewManager(context.Background(), backend, &testAllocator{}, &testKeyspaces{}, &testRegions{})
 	requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_ALREADY_EXISTS)
 }

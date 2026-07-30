@@ -42,6 +42,12 @@ func TestTableGroupServiceRejectsRequestsWhileServerIsClosed(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Nil(t, byRegionResponse)
+
+	routeResponse, err := service.GetTableGroupRoute(context.Background(), &table_grouppb.GetTableGroupRouteRequest{
+		Header: &table_grouppb.RequestHeader{ClusterId: 1},
+	})
+	require.Error(t, err)
+	require.Nil(t, routeResponse)
 }
 
 func TestTableGroupResponseHeaderPreservesStructuredPolicyError(t *testing.T) {

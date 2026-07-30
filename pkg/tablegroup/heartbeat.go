@@ -39,7 +39,9 @@ func (m *Manager) ValidateRegion(ctx context.Context, region *metapb.Region) err
 		return nil
 	}
 	err := validateRegionSnapshot(region, group)
-	needsUpdate := err == nil && region.GetTableGroup().GetAppliedMetadataVersion() > group.GetRegionBinding().GetAppliedMetadataVersion()
+	fragment, found := findFragmentBinding(group, region.GetId())
+	needsUpdate := err == nil && found &&
+		region.GetTableGroup().GetAppliedMetadataVersion() > fragment.binding.GetAppliedMetadataVersion()
 	m.mu.RUnlock()
 	if err != nil || !needsUpdate {
 		return err
@@ -51,18 +53,21 @@ func validateRegionSnapshot(region *metapb.Region, group *table_grouppb.TableGro
 	if region == nil {
 		return regionMismatch(group.GetIdentity(), "missing Region heartbeat metadata")
 	}
+	fragment, found := findFragmentBinding(group, region.GetId())
+	if !found {
+		return regionMismatch(group.GetIdentity(), "Region is not bound to a Table Group fragment")
+	}
 	if !regionMatchesGroup(region, group, false) {
-		if region.GetId() == group.GetRegionBinding().GetRegionId() &&
-			region.GetRegionEpoch() != nil && group.GetRegionBinding().GetRegionEpoch() != nil &&
-			(region.GetRegionEpoch().GetVersion() != group.GetRegionBinding().GetRegionEpoch().GetVersion() ||
-				region.GetRegionEpoch().GetConfVer() != group.GetRegionBinding().GetRegionEpoch().GetConfVer()) {
+		if region.GetRegionEpoch() != nil && fragment.binding.GetRegionEpoch() != nil &&
+			(region.GetRegionEpoch().GetVersion() != fragment.binding.GetRegionEpoch().GetVersion() ||
+				region.GetRegionEpoch().GetConfVer() != fragment.binding.GetRegionEpoch().GetConfVer()) {
 			return epochMismatch(group.GetIdentity(), "Region epoch differs from Table Group binding")
 		}
 		return regionMismatch(group.GetIdentity(), "Region identity, range, or mirror differs from Table Group authority")
 	}
 	applied := region.GetTableGroup().GetAppliedMetadataVersion()
-	if applied == 0 || applied < group.GetRegionBinding().GetAppliedMetadataVersion() {
-		return staleMetadata(group.GetIdentity(), group.GetRegionBinding().GetAppliedMetadataVersion(), applied)
+	if applied == 0 || applied < fragment.binding.GetAppliedMetadataVersion() {
+		return staleMetadata(group.GetIdentity(), fragment.binding.GetAppliedMetadataVersion(), applied)
 	}
 	if applied > group.GetMetadataVersion() {
 		return staleMetadata(group.GetIdentity(), group.GetMetadataVersion(), applied)
@@ -81,16 +86,25 @@ func (m *Manager) reconcileRegionProgress(ctx context.Context, region *metapb.Re
 		return err
 	}
 	applied := region.GetTableGroup().GetAppliedMetadataVersion()
-	if applied <= group.GetRegionBinding().GetAppliedMetadataVersion() {
+	fragment, found := findFragmentBinding(group, region.GetId())
+	if !found {
+		return regionMismatch(group.GetIdentity(), "Region is not bound to a Table Group fragment")
+	}
+	if applied <= fragment.binding.GetAppliedMetadataVersion() {
 		return nil
 	}
 	next := cloneGroup(group)
-	next.RegionBinding.AppliedMetadataVersion = applied
+	nextFragment, found := findFragmentBinding(next, region.GetId())
+	if !found {
+		return regionMismatch(group.GetIdentity(), "Table Group fragment disappeared during heartbeat reconcile")
+	}
+	nextFragment.binding.AppliedMetadataVersion = applied
 	next.StatusVersion++
 
 	var token string
 	var currentRecord, nextRecord *operationRecord
-	if group.GetState() == table_grouppb.TableGroupState_TABLE_GROUP_STATE_CREATING && applied == group.GetMetadataVersion() {
+	if group.GetState() == table_grouppb.TableGroupState_TABLE_GROUP_STATE_CREATING &&
+		allFragmentBindingsApplied(next, group.GetMetadataVersion()) {
 		next.MetadataVersion++
 		next.State = table_grouppb.TableGroupState_TABLE_GROUP_STATE_ACTIVE
 		token = tokenHex(group.GetPendingOperation().GetToken())
@@ -121,6 +135,19 @@ func (m *Manager) reconcileRegionProgress(ctx context.Context, region *metapb.Re
 		tableGroupLifecycleCounter.WithLabelValues("create", "active").Inc()
 	}
 	return nil
+}
+
+func allFragmentBindingsApplied(group *table_grouppb.TableGroup, metadataVersion uint64) bool {
+	bindings, err := fragmentBindingsForGroup(group)
+	if err != nil {
+		return false
+	}
+	for _, fragment := range bindings {
+		if fragment.binding.GetAppliedMetadataVersion() != metadataVersion {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Manager) persistStatus(ctx context.Context, current, next *table_grouppb.TableGroup) error {

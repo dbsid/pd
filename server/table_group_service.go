@@ -116,6 +116,22 @@ func (s *TableGroupServer) GetTableGroupByRegion(
 	return &table_grouppb.GetTableGroupByRegionResponse{Header: tableGroupHeader(err), TableGroup: group}, nil
 }
 
+// GetTableGroupRoute implements table_grouppb.TableGroupServiceServer.
+func (s *TableGroupServer) GetTableGroupRoute(
+	_ context.Context,
+	request *table_grouppb.GetTableGroupRouteRequest,
+) (*table_grouppb.GetTableGroupRouteResponse, error) {
+	if err := s.validateRequest(request.GetHeader()); err != nil {
+		return nil, err
+	}
+	manager, err := s.manager()
+	if err != nil {
+		return &table_grouppb.GetTableGroupRouteResponse{Header: tableGroupHeader(err)}, nil
+	}
+	route, err := manager.GetRoute(request.GetIdentity())
+	return &table_grouppb.GetTableGroupRouteResponse{Header: tableGroupHeader(err), Route: route}, nil
+}
+
 // PrepareMembership implements table_grouppb.TableGroupServiceServer.
 func (s *TableGroupServer) PrepareMembership(
 	ctx context.Context,

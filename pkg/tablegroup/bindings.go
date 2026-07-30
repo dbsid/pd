@@ -14,7 +14,11 @@
 
 package tablegroup
 
-import "github.com/pingcap/kvproto/pkg/table_grouppb"
+import (
+	"github.com/gogo/protobuf/proto"
+
+	"github.com/pingcap/kvproto/pkg/table_grouppb"
+)
 
 const maxTableGroupFragments = 1024
 
@@ -143,4 +147,12 @@ func findFragmentBinding(group *table_grouppb.TableGroup, regionID uint64) (frag
 		}
 	}
 	return fragmentBinding{}, false
+}
+
+func cloneFragmentBindings(bindings []*table_grouppb.TableGroupFragmentBinding) []*table_grouppb.TableGroupFragmentBinding {
+	clones := make([]*table_grouppb.TableGroupFragmentBinding, len(bindings))
+	for index, binding := range bindings {
+		clones[index] = proto.Clone(binding).(*table_grouppb.TableGroupFragmentBinding)
+	}
+	return clones
 }
