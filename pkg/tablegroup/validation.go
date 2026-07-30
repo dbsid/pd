@@ -53,15 +53,8 @@ func validateCreateRequest(request *table_grouppb.CreateTableGroupRequest) error
 	if err := validateOperationToken(request.GetOperationToken()); err != nil {
 		return err
 	}
-	binding := request.GetRegionBinding()
-	if binding == nil || binding.GetRegionId() == 0 || binding.GetShardId() == 0 {
-		return invalidArgument("region binding requires non-zero Region and Shard IDs")
-	}
-	if binding.GetRegionEpoch() == nil || binding.GetRegionEpoch().GetVersion() == 0 || binding.GetRegionEpoch().GetConfVer() == 0 {
-		return invalidArgument("region binding requires a complete non-zero epoch")
-	}
-	if binding.GetAppliedMetadataVersion() != 0 {
-		return invalidArgument("create region binding must not claim an applied metadata version")
+	if _, err := fragmentBindingsForCreate(request); err != nil {
+		return err
 	}
 	if request.GetSplitPolicy().GetMode() != table_grouppb.SplitPolicyMode_SPLIT_POLICY_MODE_FORBID {
 		return invalidArgument("Milestone-1 Table Groups require the forbid-split policy")
@@ -241,13 +234,8 @@ func validateStoredGroup(group *table_grouppb.TableGroup) error {
 	if group.GetMetadataVersion() == 0 || group.GetStatusVersion() == 0 {
 		return invalidArgument("stored Table Group requires non-zero metadata and status versions")
 	}
-	binding := group.GetRegionBinding()
-	if binding == nil || binding.GetRegionId() == 0 || binding.GetShardId() == 0 || binding.GetRegionEpoch() == nil ||
-		binding.GetRegionEpoch().GetVersion() == 0 || binding.GetRegionEpoch().GetConfVer() == 0 {
-		return invalidArgument("stored Table Group has an incomplete Region binding")
-	}
-	if binding.GetAppliedMetadataVersion() > group.GetMetadataVersion() {
-		return invalidArgument("stored applied metadata version exceeds authority")
+	if _, err := fragmentBindingsForGroup(group); err != nil {
+		return err
 	}
 	if group.GetSplitPolicy().GetMode() != table_grouppb.SplitPolicyMode_SPLIT_POLICY_MODE_FORBID {
 		return invalidArgument("stored Table Group does not forbid split")
