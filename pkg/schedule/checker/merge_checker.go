@@ -33,6 +33,7 @@ import (
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/placement"
 	"github.com/tikv/pd/pkg/schedule/types"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/utils/logutil"
 )
 
@@ -237,6 +238,11 @@ func AllowMerge(cluster sche.SharedCluster, region, adjacent *core.RegionInfo) b
 	} else if bytes.Equal(adjacent.GetEndKey(), region.GetStartKey()) && len(adjacent.GetEndKey()) != 0 {
 		start, end = adjacent.GetStartKey(), region.GetEndKey()
 	} else {
+		return false
+	}
+
+	mergePolicy, _ := cluster.(tablegroup.MergePolicyProvider)
+	if tablegroup.EnsureMergeAllowed(mergePolicy, region.GetMeta(), adjacent.GetMeta()) != nil {
 		return false
 	}
 

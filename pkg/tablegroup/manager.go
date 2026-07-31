@@ -482,10 +482,18 @@ func sameOperationRecord(value string, expected *operationRecord) error {
 }
 
 var _ SplitPolicyProvider = (*Manager)(nil)
+var _ MergePolicyProvider = (*Manager)(nil)
 
 // EnsureTableGroupSplitAllowed implements SplitPolicyProvider.
 func (m *Manager) EnsureTableGroupSplitAllowed(region *metapb.Region, source table_grouppb.SplitSource) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.index.ensureSplitAllowed(region, source)
+}
+
+// EnsureTableGroupMergeAllowed implements MergePolicyProvider.
+func (m *Manager) EnsureTableGroupMergeAllowed(source, target *metapb.Region) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.index.ensureMergeAllowed(source, target)
 }

@@ -453,6 +453,39 @@ func (suite *createOperatorTestSuite) TestCreateTransferLeaderOperator() {
 	}
 }
 
+func (suite *createOperatorTestSuite) TestCreateMergeRegionOperatorRejectsTableGroupMirror() {
+	peers := []*metapb.Peer{
+		{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
+		{Id: 2, StoreId: 2, Role: metapb.PeerRole_Voter},
+	}
+	newRegion := func(id uint64) *core.RegionInfo {
+		return core.NewRegionInfo(&metapb.Region{Id: id, Peers: peers}, peers[0])
+	}
+	newMirror := func() *metapb.TableGroupRegionMeta {
+		return &metapb.TableGroupRegionMeta{
+			KeyspaceId:             1,
+			TableGroupId:           101,
+			AppliedMetadataVersion: 1,
+		}
+	}
+
+	for _, protectedSide := range []string{"source", "target"} {
+		suite.Run(protectedSide, func() {
+			source := newRegion(68)
+			target := newRegion(86)
+			if protectedSide == "source" {
+				source.GetMeta().TableGroup = newMirror()
+			} else {
+				target.GetMeta().TableGroup = newMirror()
+			}
+
+			ops, err := CreateMergeRegionOperator("test", suite.cluster, source, target, OpMerge)
+			suite.Error(err)
+			suite.Nil(ops)
+		})
+	}
+}
+
 func (suite *createOperatorTestSuite) TestCreateLeaveJointStateOperator() {
 	re := suite.Require()
 	type testCase struct {

@@ -1115,6 +1115,14 @@ func (c *RaftCluster) EnsureTableGroupSplitAllowed(region *metapb.Region, source
 	return c.tableGroupManager.EnsureTableGroupSplitAllowed(region, source)
 }
 
+// EnsureTableGroupMergeAllowed implements tablegroup.MergePolicyProvider.
+func (c *RaftCluster) EnsureTableGroupMergeAllowed(source, target *metapb.Region) error {
+	if c.tableGroupManager == nil {
+		return tablegroup.EnsureMergeAllowed(nil, source, target)
+	}
+	return c.tableGroupManager.EnsureTableGroupMergeAllowed(source, target)
+}
+
 // GetStorage returns the storage.
 func (c *RaftCluster) GetStorage() storage.Storage {
 	return c.storage

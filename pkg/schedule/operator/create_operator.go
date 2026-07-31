@@ -29,6 +29,7 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/placement"
+	"github.com/tikv/pd/pkg/tablegroup"
 	"github.com/tikv/pd/pkg/utils/logutil"
 )
 
@@ -179,6 +180,10 @@ func CreateSplitRegionOperator(desc string, region *core.RegionInfo, kind OpKind
 
 // CreateMergeRegionOperator creates an operator that merge two region into one.
 func CreateMergeRegionOperator(desc string, ci sche.SharedCluster, source *core.RegionInfo, target *core.RegionInfo, kind OpKind) ([]*Operator, error) {
+	mergePolicy, _ := ci.(tablegroup.MergePolicyProvider)
+	if err := tablegroup.EnsureMergeAllowed(mergePolicy, source.GetMeta(), target.GetMeta()); err != nil {
+		return nil, err
+	}
 	if core.IsInJointState(source.GetPeers()...) || core.IsInJointState(target.GetPeers()...) {
 		return nil, errors.Errorf("cannot merge regions which are in joint state")
 	}

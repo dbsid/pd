@@ -17,6 +17,7 @@ package checker
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"testing"
 	"time"
 
@@ -52,6 +53,14 @@ type mergeCheckerTestSuite struct {
 	cluster *mockcluster.Cluster
 	mc      *MergeChecker
 	regions []*core.RegionInfo
+}
+
+type rejectingTableGroupMergeCluster struct {
+	*mockcluster.Cluster
+}
+
+func (*rejectingTableGroupMergeCluster) EnsureTableGroupMergeAllowed(_, _ *metapb.Region) error {
+	return errors.New("table group merge rejected")
 }
 
 func TestMergeCheckerTestSuite(t *testing.T) {
@@ -682,6 +691,18 @@ func TestAllowMergeCrossTable(t *testing.T) {
 			re.Equal(tc.expectAllow, AllowMerge(cluster, regionA, regionB))
 		})
 	}
+}
+
+func TestAllowMergeRespectsTableGroupPolicy(t *testing.T) {
+	cluster := mockcluster.NewCluster(t.Context(), mockconfig.NewTestOptions())
+	cluster.SetEnablePlacementRules(false)
+	cluster.SetEnableCrossTableMerge(true)
+	left := newRegionInfoWithBytes(1, []byte("a"), []byte("b"))
+	right := newRegionInfoWithBytes(2, []byte("b"), []byte("c"))
+	require.True(t, AllowMerge(cluster, left, right))
+
+	protectedCluster := &rejectingTableGroupMergeCluster{Cluster: cluster}
+	require.False(t, AllowMerge(protectedCluster, left, right))
 }
 
 func encodeKeyspaceRawKey(keyspaceID uint32, rawKey []byte) []byte {

@@ -156,6 +156,19 @@ func (p *policyIndex) ensureSplitAllowed(region *metapb.Region, source table_gro
 	return ensureMirrorSplitAllowed(region, source)
 }
 
+func (p *policyIndex) ensureMergeAllowed(source, target *metapb.Region) error {
+	if source == nil || target == nil {
+		return invalidArgument("missing Region for merge")
+	}
+	if group := p.groupForRegion(source); group != nil {
+		return operationConflict(group.GetIdentity(), nil, "Table Group policy forbids Region merge")
+	}
+	if group := p.groupForRegion(target); group != nil {
+		return operationConflict(group.GetIdentity(), nil, "Table Group policy forbids Region merge")
+	}
+	return ensureMirrorMergeAllowed(source, target)
+}
+
 func ensureMirrorSplitAllowed(region *metapb.Region, source table_grouppb.SplitSource) error {
 	if region == nil {
 		return invalidArgument("missing Region for split")
@@ -173,6 +186,24 @@ func ensureMirrorSplitAllowed(region *metapb.Region, source table_grouppb.SplitS
 		reason = table_grouppb.SplitRejectionReason_SPLIT_REJECTION_REASON_REGION_BINDING_MISMATCH
 	}
 	return splitForbidden(identity, source, reason, "Table Group Region mirror forbids split")
+}
+
+func ensureMirrorMergeAllowed(source, target *metapb.Region) error {
+	if source == nil || target == nil {
+		return invalidArgument("missing Region for merge")
+	}
+	for _, region := range []*metapb.Region{source, target} {
+		mirror := region.GetTableGroup()
+		if mirror == nil {
+			continue
+		}
+		identity := &table_grouppb.TableGroupIdentity{
+			KeyspaceId:   mirror.GetKeyspaceId(),
+			TableGroupId: mirror.GetTableGroupId(),
+		}
+		return operationConflict(identity, nil, "Table Group Region mirror forbids merge")
+	}
+	return nil
 }
 
 func regionMatchesGroup(region *metapb.Region, group *table_grouppb.TableGroup, requireAppliedVersion bool) bool {
@@ -258,6 +289,11 @@ type SplitPolicyProvider interface {
 	EnsureTableGroupSplitAllowed(region *metapb.Region, source table_grouppb.SplitSource) error
 }
 
+// MergePolicyProvider supplies an authoritative or watched Table Group merge decision.
+type MergePolicyProvider interface {
+	EnsureTableGroupMergeAllowed(source, target *metapb.Region) error
+}
+
 // SplitSourceFromReason maps the existing PD split reason to the U1 policy source.
 func SplitSourceFromReason(reason pdpb.SplitReason) table_grouppb.SplitSource {
 	switch reason {
@@ -276,6 +312,14 @@ func EnsureSplitAllowed(provider SplitPolicyProvider, region *metapb.Region, sou
 		return provider.EnsureTableGroupSplitAllowed(region, source)
 	}
 	return ensureMirrorSplitAllowed(region, source)
+}
+
+// EnsureMergeAllowed applies provider policy and always preserves mirror-only fail-closed behavior.
+func EnsureMergeAllowed(provider MergePolicyProvider, source, target *metapb.Region) error {
+	if provider != nil {
+		return provider.EnsureTableGroupMergeAllowed(source, target)
+	}
+	return ensureMirrorMergeAllowed(source, target)
 }
 
 // SplitPolicyRegistry is a read-only watched policy registry for the scheduling service.
@@ -370,6 +414,13 @@ func (r *SplitPolicyRegistry) EnsureTableGroupSplitAllowed(region *metapb.Region
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.index.ensureSplitAllowed(region, source)
+}
+
+// EnsureTableGroupMergeAllowed implements MergePolicyProvider.
+func (r *SplitPolicyRegistry) EnsureTableGroupMergeAllowed(source, target *metapb.Region) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.index.ensureMergeAllowed(source, target)
 }
 
 // ValidateRegion validates a Region against watched Table Group authority.

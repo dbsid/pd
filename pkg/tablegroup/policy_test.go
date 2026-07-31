@@ -82,6 +82,40 @@ func TestTableGroupSplitPolicyRejectsIdentityRangeAndMirrorPaths(t *testing.T) {
 		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_SPLIT_FORBIDDEN)
 }
 
+func TestTableGroupMergePolicyRejectsAuthorityRangeAndMirrorPaths(t *testing.T) {
+	group := validStoredGroup(101, 10)
+	registry := NewSplitPolicyRegistry()
+	require.NoError(t, registry.Sync(group))
+	bound := keyspace.MakeRegionBound(group.GetIdentity().GetKeyspaceId())
+	protected := &metapb.Region{
+		Id:       group.GetRegionBinding().GetRegionId(),
+		StartKey: bytes.Clone(bound.TxnLeftBound),
+		EndKey:   bytes.Clone(bound.TxnRightBound),
+	}
+	ordinaryLeft := &metapb.Region{Id: 98, StartKey: []byte("a"), EndKey: []byte("b")}
+	ordinaryRight := &metapb.Region{Id: 99, StartKey: []byte("b"), EndKey: []byte("c")}
+
+	require.Error(t, EnsureMergeAllowed(registry, protected, ordinaryRight))
+	require.Error(t, EnsureMergeAllowed(registry, ordinaryLeft, protected))
+
+	overlap := &metapb.Region{
+		Id:       11,
+		StartKey: bytes.Clone(bound.TxnLeftBound),
+		EndKey:   append(bytes.Clone(bound.TxnLeftBound), 0),
+	}
+	require.Error(t, EnsureMergeAllowed(registry, overlap, ordinaryRight))
+
+	mirrorOnly := proto.Clone(ordinaryLeft).(*metapb.Region)
+	mirrorOnly.TableGroup = &metapb.TableGroupRegionMeta{
+		KeyspaceId:             1,
+		TableGroupId:           101,
+		AppliedMetadataVersion: 1,
+	}
+	require.Error(t, EnsureMergeAllowed(nil, mirrorOnly, ordinaryRight))
+
+	require.NoError(t, EnsureMergeAllowed(registry, ordinaryLeft, ordinaryRight))
+}
+
 func TestTableGroupSplitPolicyRegistryRejectsStaleOrConflictingSnapshot(t *testing.T) {
 	registry := NewSplitPolicyRegistry()
 	current := validStoredGroup(101, 10)

@@ -327,6 +327,11 @@ func (c *Cluster) EnsureTableGroupSplitAllowed(region *metapb.Region, source tab
 	return c.tableGroupPolicy.EnsureTableGroupSplitAllowed(region, source)
 }
 
+// EnsureTableGroupMergeAllowed implements tablegroup.MergePolicyProvider.
+func (c *Cluster) EnsureTableGroupMergeAllowed(source, target *metapb.Region) error {
+	return c.tableGroupPolicy.EnsureTableGroupMergeAllowed(source, target)
+}
+
 // SetRuntimeResources installs the cluster-scoped runtime resources after they are created.
 func (c *Cluster) SetRuntimeResources(
 	metaWatcher *meta.Watcher,
