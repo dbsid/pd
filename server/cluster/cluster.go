@@ -1327,15 +1327,15 @@ var syncRunner = ratelimit.NewSyncRunner()
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(ctx *core.MetaProcessContext, region *core.RegionInfo) error {
 	tracer := ctx.Tracer
-	if c.tableGroupManager != nil {
-		if err := c.tableGroupManager.ValidateRegion(ctx, region.GetMeta()); err != nil {
-			return err
-		}
-	}
 	origin, _, err := c.PreCheckPutRegion(region)
 	tracer.OnPreCheckFinished()
 	if err != nil {
 		return err
+	}
+	if c.tableGroupManager != nil {
+		if err := c.tableGroupManager.ValidateRegion(ctx, region.GetMeta()); err != nil {
+			return err
+		}
 	}
 
 	region.Inherit(origin, c.GetStoreConfig().IsEnableRegionBucket())

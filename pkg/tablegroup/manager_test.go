@@ -374,6 +374,62 @@ func TestHashFragmentTableGroupActivatesOnlyAfterEveryFragmentAndRestarts(t *tes
 	}
 }
 
+func TestHashFragmentTableGroupTracksRegionConfChanges(t *testing.T) {
+	env := newHashFragmentManagerTestEnv(t, 9)
+	created, err := env.manager.Create(context.Background(), env.request)
+	require.NoError(t, err)
+
+	moved := env.fragmentHeartbeat(created, 3, created.GetMetadataVersion())
+	moved.RegionEpoch.ConfVer++
+	moved.Peers = append(moved.Peers, &metapb.Peer{Id: 2000, StoreId: 2, Role: metapb.PeerRole_Learner})
+	require.NoError(t, env.manager.ValidateRegion(context.Background(), moved))
+
+	current, err := env.manager.Get(created.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, moved.GetRegionEpoch().GetConfVer(),
+		current.GetFragmentBindings()[3].GetRegionBinding().GetRegionEpoch().GetConfVer())
+	require.Equal(t, created.GetMetadataVersion(),
+		current.GetFragmentBindings()[3].GetRegionBinding().GetAppliedMetadataVersion())
+
+	for fragmentID := range uint32(9) {
+		if fragmentID == 3 {
+			continue
+		}
+		require.NoError(t, env.manager.ValidateRegion(
+			context.Background(),
+			env.fragmentHeartbeat(current, fragmentID, current.GetMetadataVersion()),
+		))
+	}
+	active, err := env.manager.Get(created.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, table_grouppb.TableGroupState_TABLE_GROUP_STATE_ACTIVE, active.GetState())
+
+	movedAgain := env.fragmentHeartbeat(active, 3, active.GetMetadataVersion())
+	movedAgain.RegionEpoch.ConfVer = moved.GetRegionEpoch().GetConfVer() + 1
+	require.NoError(t, env.manager.ValidateRegion(context.Background(), movedAgain))
+	active, err = env.manager.Get(active.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, movedAgain.GetRegionEpoch().GetConfVer(),
+		active.GetFragmentBindings()[3].GetRegionBinding().GetRegionEpoch().GetConfVer())
+
+	staleConfVer := proto.Clone(movedAgain).(*metapb.Region)
+	staleConfVer.RegionEpoch.ConfVer--
+	requireErrorCode(t, env.manager.ValidateRegion(context.Background(), staleConfVer),
+		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_EPOCH_MISMATCH)
+
+	differentVersion := proto.Clone(movedAgain).(*metapb.Region)
+	differentVersion.RegionEpoch.Version++
+	requireErrorCode(t, env.manager.ValidateRegion(context.Background(), differentVersion),
+		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_EPOCH_MISMATCH)
+
+	restarted, err := NewManager(context.Background(), env.storage, env.allocator, env.keyspaces, env.regions)
+	require.NoError(t, err)
+	persisted, err := restarted.Get(active.GetIdentity())
+	require.NoError(t, err)
+	require.Equal(t, movedAgain.GetRegionEpoch().GetConfVer(),
+		persisted.GetFragmentBindings()[3].GetRegionBinding().GetRegionEpoch().GetConfVer())
+}
+
 func TestHashFragmentTableGroupRejectsNonContiguousRegions(t *testing.T) {
 	env := newHashFragmentManagerTestEnv(t, 9)
 	region := proto.Clone(env.fragments[4]).(*metapb.Region)

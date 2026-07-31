@@ -41,7 +41,8 @@ func (m *Manager) ValidateRegion(ctx context.Context, region *metapb.Region) err
 	err := validateRegionSnapshot(region, group)
 	fragment, found := findFragmentBinding(group, region.GetId())
 	needsUpdate := err == nil && found &&
-		region.GetTableGroup().GetAppliedMetadataVersion() > fragment.binding.GetAppliedMetadataVersion()
+		(region.GetTableGroup().GetAppliedMetadataVersion() > fragment.binding.GetAppliedMetadataVersion() ||
+			region.GetRegionEpoch().GetConfVer() > fragment.binding.GetRegionEpoch().GetConfVer())
 	m.mu.RUnlock()
 	if err != nil || !needsUpdate {
 		return err
@@ -57,12 +58,10 @@ func validateRegionSnapshot(region *metapb.Region, group *table_grouppb.TableGro
 	if !found {
 		return regionMismatch(group.GetIdentity(), "Region is not bound to a Table Group fragment")
 	}
-	if !regionMatchesGroup(region, group, false) {
-		if region.GetRegionEpoch() != nil && fragment.binding.GetRegionEpoch() != nil &&
-			(region.GetRegionEpoch().GetVersion() != fragment.binding.GetRegionEpoch().GetVersion() ||
-				region.GetRegionEpoch().GetConfVer() != fragment.binding.GetRegionEpoch().GetConfVer()) {
-			return epochMismatch(group.GetIdentity(), "Region epoch differs from Table Group binding")
-		}
+	if !regionEpochFollowsBinding(region.GetRegionEpoch(), fragment.binding.GetRegionEpoch()) {
+		return epochMismatch(group.GetIdentity(), "Region epoch does not follow Table Group binding")
+	}
+	if !regionMatchesGroupObservation(region, group, false) {
 		return regionMismatch(group.GetIdentity(), "Region identity, range, or mirror differs from Table Group authority")
 	}
 	applied := region.GetTableGroup().GetAppliedMetadataVersion()
@@ -90,7 +89,10 @@ func (m *Manager) reconcileRegionProgress(ctx context.Context, region *metapb.Re
 	if !found {
 		return regionMismatch(group.GetIdentity(), "Region is not bound to a Table Group fragment")
 	}
-	if applied <= fragment.binding.GetAppliedMetadataVersion() {
+	confVer := region.GetRegionEpoch().GetConfVer()
+	appliedAdvanced := applied > fragment.binding.GetAppliedMetadataVersion()
+	confVerAdvanced := confVer > fragment.binding.GetRegionEpoch().GetConfVer()
+	if !appliedAdvanced && !confVerAdvanced {
 		return nil
 	}
 	next := cloneGroup(group)
@@ -98,7 +100,15 @@ func (m *Manager) reconcileRegionProgress(ctx context.Context, region *metapb.Re
 	if !found {
 		return regionMismatch(group.GetIdentity(), "Table Group fragment disappeared during heartbeat reconcile")
 	}
-	nextFragment.binding.AppliedMetadataVersion = applied
+	if appliedAdvanced {
+		nextFragment.binding.AppliedMetadataVersion = applied
+	}
+	if confVerAdvanced {
+		nextFragment.binding.RegionEpoch = &metapb.RegionEpoch{
+			Version: region.GetRegionEpoch().GetVersion(),
+			ConfVer: confVer,
+		}
+	}
 	next.StatusVersion++
 
 	var token string

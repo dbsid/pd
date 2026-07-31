@@ -108,8 +108,31 @@ func TestTableGroupSplitPolicyRegistryRejectsStaleOrConflictingSnapshot(t *testi
 	statusUpdate := cloneGroup(current)
 	statusUpdate.StatusVersion++
 	statusUpdate.RegionBinding.AppliedMetadataVersion++
+	statusUpdate.RegionBinding.RegionEpoch.ConfVer++
 	require.NoError(t, registry.Sync(statusUpdate))
 	require.Same(t, originalRange, &registry.index.ranges[0], "status-only updates must not rebuild protected ranges")
+
+	observedNewerConfVer := &metapb.Region{
+		Id:          statusUpdate.GetRegionBinding().GetRegionId(),
+		StartKey:    keyspace.MakeRegionBound(statusUpdate.GetIdentity().GetKeyspaceId()).TxnLeftBound,
+		EndKey:      keyspace.MakeRegionBound(statusUpdate.GetIdentity().GetKeyspaceId()).TxnRightBound,
+		RegionEpoch: proto.Clone(statusUpdate.GetRegionBinding().GetRegionEpoch()).(*metapb.RegionEpoch),
+		TableGroup: &metapb.TableGroupRegionMeta{
+			KeyspaceId:             statusUpdate.GetIdentity().GetKeyspaceId(),
+			TableGroupId:           statusUpdate.GetIdentity().GetTableGroupId(),
+			AppliedMetadataVersion: statusUpdate.GetRegionBinding().GetAppliedMetadataVersion(),
+		},
+	}
+	observedNewerConfVer.RegionEpoch.ConfVer++
+	require.NoError(t, registry.ValidateRegion(observedNewerConfVer))
+	observedNewerConfVer.RegionEpoch.ConfVer -= 2
+	requireErrorCode(t, registry.ValidateRegion(observedNewerConfVer),
+		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_REGION_MISMATCH)
+
+	statusConflict = cloneGroup(statusUpdate)
+	statusConflict.RegionBinding.RegionEpoch.ConfVer++
+	requireErrorCode(t, registry.Sync(statusConflict),
+		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_OPERATION_CONFLICT)
 
 	metadataUpdate := cloneGroup(statusUpdate)
 	metadataUpdate.MetadataVersion++

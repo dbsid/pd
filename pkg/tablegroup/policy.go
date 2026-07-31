@@ -183,6 +183,38 @@ func regionMatchesGroup(region *metapb.Region, group *table_grouppb.TableGroup, 
 	if !ok || !proto.Equal(region.GetRegionEpoch(), fragment.binding.GetRegionEpoch()) {
 		return false
 	}
+	return regionMatchesFragment(region, group, fragment, requireAppliedVersion)
+}
+
+func regionMatchesGroupObservation(
+	region *metapb.Region,
+	group *table_grouppb.TableGroup,
+	requireAppliedVersion bool,
+) bool {
+	if region == nil || group == nil || group.GetIdentity() == nil {
+		return false
+	}
+	fragment, ok := findFragmentBinding(group, region.GetId())
+	if !ok || !regionEpochFollowsBinding(region.GetRegionEpoch(), fragment.binding.GetRegionEpoch()) {
+		return false
+	}
+	return regionMatchesFragment(region, group, fragment, requireAppliedVersion)
+}
+
+// Region version is immutable because Table Groups forbid splits. ConfVer may
+// advance when PD moves peers without changing the fragment's key range.
+func regionEpochFollowsBinding(observed, binding *metapb.RegionEpoch) bool {
+	return observed != nil && binding != nil &&
+		observed.GetVersion() == binding.GetVersion() &&
+		observed.GetConfVer() >= binding.GetConfVer()
+}
+
+func regionMatchesFragment(
+	region *metapb.Region,
+	group *table_grouppb.TableGroup,
+	fragment fragmentBinding,
+	requireAppliedVersion bool,
+) bool {
 	bound := keyspace.MakeRegionBound(group.GetIdentity().GetKeyspaceId())
 	if group.GetPartitioning() == nil {
 		if !bytes.Equal(region.GetStartKey(), bound.TxnLeftBound) || !bytes.Equal(region.GetEndKey(), bound.TxnRightBound) {
@@ -275,8 +307,8 @@ func equalMetadataSpec(left, right *table_grouppb.TableGroup) bool {
 	rightSpec.StatusVersion = 0
 	leftSpec.CapacityStatus = nil
 	rightSpec.CapacityStatus = nil
-	clearAppliedMetadataVersions(leftSpec)
-	clearAppliedMetadataVersions(rightSpec)
+	clearObservedRegionState(leftSpec)
+	clearObservedRegionState(rightSpec)
 	return proto.Equal(leftSpec, rightSpec)
 }
 
@@ -288,6 +320,7 @@ func equalObservedStatus(left, right *table_grouppb.TableGroup) bool {
 	}
 	for index := range leftBindings {
 		if leftBindings[index].fragmentID != rightBindings[index].fragmentID ||
+			!proto.Equal(leftBindings[index].binding.GetRegionEpoch(), rightBindings[index].binding.GetRegionEpoch()) ||
 			leftBindings[index].binding.GetAppliedMetadataVersion() != rightBindings[index].binding.GetAppliedMetadataVersion() {
 			return false
 		}
@@ -295,14 +328,19 @@ func equalObservedStatus(left, right *table_grouppb.TableGroup) bool {
 	return proto.Equal(left.GetCapacityStatus(), right.GetCapacityStatus())
 }
 
-func clearAppliedMetadataVersions(group *table_grouppb.TableGroup) {
-	if group.GetRegionBinding() != nil {
-		group.RegionBinding.AppliedMetadataVersion = 0
-	}
-	for _, fragment := range group.GetFragmentBindings() {
-		if fragment.GetRegionBinding() != nil {
-			fragment.RegionBinding.AppliedMetadataVersion = 0
+func clearObservedRegionState(group *table_grouppb.TableGroup) {
+	clearBinding := func(binding *table_grouppb.TableGroupRegionBinding) {
+		if binding == nil {
+			return
 		}
+		binding.AppliedMetadataVersion = 0
+		if binding.GetRegionEpoch() != nil {
+			binding.RegionEpoch.ConfVer = 0
+		}
+	}
+	clearBinding(group.GetRegionBinding())
+	for _, fragment := range group.GetFragmentBindings() {
+		clearBinding(fragment.GetRegionBinding())
 	}
 }
 
@@ -331,7 +369,7 @@ func (r *SplitPolicyRegistry) ValidateRegion(region *metapb.Region) error {
 		}
 		return nil
 	}
-	if !regionMatchesGroup(region, group, true) {
+	if !regionMatchesGroupObservation(region, group, true) {
 		return regionMismatch(group.GetIdentity(), "Region does not match Table Group authority")
 	}
 	return nil
