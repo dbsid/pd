@@ -215,6 +215,11 @@ func regionMatchesFragment(
 	fragment fragmentBinding,
 	requireAppliedVersion bool,
 ) bool {
+	return regionMatchesFragmentRange(region, group) &&
+		regionMatchesFragmentMirror(region, group, fragment, requireAppliedVersion)
+}
+
+func regionMatchesFragmentRange(region *metapb.Region, group *table_grouppb.TableGroup) bool {
 	bound := keyspace.MakeRegionBound(group.GetIdentity().GetKeyspaceId())
 	if group.GetPartitioning() == nil {
 		if !bytes.Equal(region.GetStartKey(), bound.TxnLeftBound) || !bytes.Equal(region.GetEndKey(), bound.TxnRightBound) {
@@ -225,6 +230,15 @@ func regionMatchesFragment(
 		bytes.Compare(region.GetStartKey(), region.GetEndKey()) >= 0 {
 		return false
 	}
+	return true
+}
+
+func regionMatchesFragmentMirror(
+	region *metapb.Region,
+	group *table_grouppb.TableGroup,
+	fragment fragmentBinding,
+	requireAppliedVersion bool,
+) bool {
 	mirror := region.GetTableGroup()
 	if mirror == nil || mirror.GetKeyspaceId() != group.GetIdentity().GetKeyspaceId() ||
 		mirror.GetTableGroupId() != group.GetIdentity().GetTableGroupId() ||
@@ -369,10 +383,7 @@ func (r *SplitPolicyRegistry) ValidateRegion(region *metapb.Region) error {
 		}
 		return nil
 	}
-	if !regionMatchesGroupObservation(region, group, true) {
-		return regionMismatch(group.GetIdentity(), "Region does not match Table Group authority")
-	}
-	return nil
+	return validateRegionSnapshot(region, group)
 }
 
 func cloneGroup(group *table_grouppb.TableGroup) *table_grouppb.TableGroup {

@@ -379,15 +379,27 @@ func TestHashFragmentTableGroupTracksRegionConfChanges(t *testing.T) {
 	created, err := env.manager.Create(context.Background(), env.request)
 	require.NoError(t, err)
 
-	moved := env.fragmentHeartbeat(created, 3, created.GetMetadataVersion())
-	moved.RegionEpoch.ConfVer++
-	moved.Peers = append(moved.Peers, &metapb.Peer{Id: 2000, StoreId: 2, Role: metapb.PeerRole_Learner})
-	require.NoError(t, env.manager.ValidateRegion(context.Background(), moved))
+	pendingMove := proto.Clone(env.fragments[3]).(*metapb.Region)
+	pendingMove.RegionEpoch.ConfVer++
+	pendingMove.Peers = append(pendingMove.Peers, &metapb.Peer{Id: 2000, StoreId: 2, Role: metapb.PeerRole_Learner})
+	require.NoError(t, env.manager.ValidateRegion(context.Background(), pendingMove))
 
 	current, err := env.manager.Get(created.GetIdentity())
 	require.NoError(t, err)
-	require.Equal(t, moved.GetRegionEpoch().GetConfVer(),
+	require.Equal(t, pendingMove.GetRegionEpoch().GetConfVer(),
 		current.GetFragmentBindings()[3].GetRegionBinding().GetRegionEpoch().GetConfVer())
+	require.Zero(t, current.GetFragmentBindings()[3].GetRegionBinding().GetAppliedMetadataVersion())
+
+	registry := NewSplitPolicyRegistry()
+	require.NoError(t, registry.Sync(created))
+	require.NoError(t, registry.ValidateRegion(pendingMove))
+
+	moved := env.fragmentHeartbeat(current, 3, current.GetMetadataVersion())
+	moved.RegionEpoch.ConfVer = pendingMove.GetRegionEpoch().GetConfVer()
+	moved.Peers = pendingMove.GetPeers()
+	require.NoError(t, env.manager.ValidateRegion(context.Background(), moved))
+	current, err = env.manager.Get(created.GetIdentity())
+	require.NoError(t, err)
 	require.Equal(t, created.GetMetadataVersion(),
 		current.GetFragmentBindings()[3].GetRegionBinding().GetAppliedMetadataVersion())
 
@@ -411,6 +423,10 @@ func TestHashFragmentTableGroupTracksRegionConfChanges(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, movedAgain.GetRegionEpoch().GetConfVer(),
 		active.GetFragmentBindings()[3].GetRegionBinding().GetRegionEpoch().GetConfVer())
+	missingMirror := proto.Clone(movedAgain).(*metapb.Region)
+	missingMirror.TableGroup = nil
+	requireErrorCode(t, env.manager.ValidateRegion(context.Background(), missingMirror),
+		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_REGION_MISMATCH)
 
 	staleConfVer := proto.Clone(movedAgain).(*metapb.Region)
 	staleConfVer.RegionEpoch.ConfVer--
@@ -561,14 +577,15 @@ func TestTableGroupLifecycleIsIdempotentAndRecoverableAfterRestart(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), unchanged.GetMetadataVersion())
 
-	err = env.manager.ValidateRegion(context.Background(), env.region)
-	requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_REGION_MISMATCH)
+	require.NoError(t, env.manager.ValidateRegion(context.Background(), env.region))
 	require.NoError(t, env.manager.ValidateRegion(context.Background(), env.heartbeat(created, 1)))
 	active, err := env.manager.Get(created.GetIdentity())
 	require.NoError(t, err)
 	require.Equal(t, table_grouppb.TableGroupState_TABLE_GROUP_STATE_ACTIVE, active.GetState())
 	require.Equal(t, uint64(2), active.GetMetadataVersion())
 	require.Equal(t, uint64(1), active.GetRegionBinding().GetAppliedMetadataVersion())
+	err = env.manager.ValidateRegion(context.Background(), env.region)
+	requireErrorCode(t, err, table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_REGION_MISMATCH)
 
 	require.NoError(t, env.manager.ValidateRegion(context.Background(), env.heartbeat(active, 2)))
 	active, err = env.manager.Get(active.GetIdentity())

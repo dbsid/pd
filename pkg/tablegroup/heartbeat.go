@@ -40,8 +40,9 @@ func (m *Manager) ValidateRegion(ctx context.Context, region *metapb.Region) err
 	}
 	err := validateRegionSnapshot(region, group)
 	fragment, found := findFragmentBinding(group, region.GetId())
+	applied := region.GetTableGroup().GetAppliedMetadataVersion()
 	needsUpdate := err == nil && found &&
-		(region.GetTableGroup().GetAppliedMetadataVersion() > fragment.binding.GetAppliedMetadataVersion() ||
+		(applied > fragment.binding.GetAppliedMetadataVersion() ||
 			region.GetRegionEpoch().GetConfVer() > fragment.binding.GetRegionEpoch().GetConfVer())
 	m.mu.RUnlock()
 	if err != nil || !needsUpdate {
@@ -61,10 +62,25 @@ func validateRegionSnapshot(region *metapb.Region, group *table_grouppb.TableGro
 	if !regionEpochFollowsBinding(region.GetRegionEpoch(), fragment.binding.GetRegionEpoch()) {
 		return epochMismatch(group.GetIdentity(), "Region epoch does not follow Table Group binding")
 	}
-	if !regionMatchesGroupObservation(region, group, false) {
+	if !regionMatchesFragmentRange(region, group) {
 		return regionMismatch(group.GetIdentity(), "Region identity, range, or mirror differs from Table Group authority")
 	}
-	applied := region.GetTableGroup().GetAppliedMetadataVersion()
+	mirror := region.GetTableGroup()
+	if mirror == nil {
+		if group.GetState() == table_grouppb.TableGroupState_TABLE_GROUP_STATE_CREATING &&
+			fragment.binding.GetAppliedMetadataVersion() == 0 {
+			return nil
+		}
+		return regionMismatch(group.GetIdentity(), "Region mirror is missing after Table Group attachment")
+	}
+	if !regionMatchesFragmentMirror(region, group, fragment, false) {
+		return regionMismatch(group.GetIdentity(), "Region identity, range, or mirror differs from Table Group authority")
+	}
+	applied := mirror.GetAppliedMetadataVersion()
+	if applied == 0 && group.GetState() == table_grouppb.TableGroupState_TABLE_GROUP_STATE_CREATING &&
+		fragment.binding.GetAppliedMetadataVersion() == 0 {
+		return nil
+	}
 	if applied == 0 || applied < fragment.binding.GetAppliedMetadataVersion() {
 		return staleMetadata(group.GetIdentity(), fragment.binding.GetAppliedMetadataVersion(), applied)
 	}

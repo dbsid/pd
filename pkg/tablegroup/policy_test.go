@@ -127,7 +127,7 @@ func TestTableGroupSplitPolicyRegistryRejectsStaleOrConflictingSnapshot(t *testi
 	require.NoError(t, registry.ValidateRegion(observedNewerConfVer))
 	observedNewerConfVer.RegionEpoch.ConfVer -= 2
 	requireErrorCode(t, registry.ValidateRegion(observedNewerConfVer),
-		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_REGION_MISMATCH)
+		table_grouppb.TableGroupErrorCode_TABLE_GROUP_ERROR_CODE_EPOCH_MISMATCH)
 
 	statusConflict = cloneGroup(statusUpdate)
 	statusConflict.RegionBinding.RegionEpoch.ConfVer++
