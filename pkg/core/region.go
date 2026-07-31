@@ -934,6 +934,13 @@ func GenerateRegionGuideFunc(enableLog bool) RegionGuideFunc {
 				}
 				saveKV, saveCache, retained = true, true, true
 			}
+			if !proto.Equal(region.GetMeta().GetTableGroup(), origin.GetMeta().GetTableGroup()) {
+				if log.GetLevel() <= zap.InfoLevel {
+					info("Table Group Region mirror changed",
+						zap.Uint64("region-id", region.GetID()))
+				}
+				saveKV, saveCache, retained = true, true, true
+			}
 			if region.GetLeader().GetId() != origin.GetLeader().GetId() {
 				if origin.GetLeader().GetId() != 0 && log.GetLevel() <= zap.InfoLevel {
 					info("leader changed",

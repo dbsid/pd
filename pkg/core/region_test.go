@@ -431,6 +431,38 @@ func TestNeedSync(t *testing.T) {
 	}
 }
 
+func TestRegionGuidePersistsTableGroupMirrorChanges(t *testing.T) {
+	meta := &metapb.Region{
+		Id:          1000,
+		StartKey:    []byte("a"),
+		EndKey:      []byte("z"),
+		RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
+		Peers:       []*metapb.Peer{{Id: 11, StoreId: 1, Role: metapb.PeerRole_Voter}},
+	}
+	origin := NewRegionInfo(meta, meta.Peers[0])
+	attached := origin.Clone()
+	attached.GetMeta().TableGroup = &metapb.TableGroupRegionMeta{
+		KeyspaceId:             7,
+		TableGroupId:           11,
+		AppliedMetadataVersion: 1,
+		FragmentId:             3,
+	}
+
+	regionGuide := GenerateRegionGuideFunc(false)
+	saveKV, saveCache, _, _ := regionGuide(ContextTODO(), attached, origin)
+	require.True(t, saveKV)
+	require.True(t, saveCache)
+	saveKV, saveCache, _, _ = regionGuide(ContextTODO(), attached.Clone(), attached)
+	require.False(t, saveKV)
+	require.False(t, saveCache)
+
+	advanced := attached.Clone()
+	advanced.GetMeta().TableGroup.AppliedMetadataVersion++
+	saveKV, saveCache, _, _ = regionGuide(ContextTODO(), advanced, attached)
+	require.True(t, saveKV)
+	require.True(t, saveCache)
+}
+
 func TestRegionMap(t *testing.T) {
 	re := require.New(t)
 	rm := make(map[uint64]*regionItem)
