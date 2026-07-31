@@ -39,6 +39,15 @@ func SetStoreAddress(address, statusAddress, peerAddress string) StoreCreateOpti
 	}
 }
 
+// SetStoreSQLAddress sets the SQL address advertised by the store.
+func SetStoreSQLAddress(sqlAddress string) StoreCreateOption {
+	return func(store *StoreInfo) {
+		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta.SqlAddress = sqlAddress
+		store.meta = meta
+	}
+}
+
 // SetStoreLabels sets the labels for the store.
 func SetStoreLabels(labels []*metapb.StoreLabel) StoreCreateOption {
 	return func(store *StoreInfo) {

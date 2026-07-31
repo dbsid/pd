@@ -1583,6 +1583,7 @@ func (c *RaftCluster) putStoreImpl(store *metapb.Store, force bool) error {
 		}
 		opts = append(opts,
 			core.SetStoreAddress(store.Address, store.StatusAddress, store.PeerAddress),
+			core.SetStoreSQLAddress(store.SqlAddress),
 			core.SetStoreVersion(store.GitHash, store.Version),
 			core.SetStoreLabels(labels),
 			core.SetStoreStartTime(store.StartTimestamp),

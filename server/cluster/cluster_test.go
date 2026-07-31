@@ -251,6 +251,36 @@ func TestFilterUnhealthyStore(t *testing.T) {
 	}
 }
 
+func TestPutMetaStoreUpdatesSQLAddress(t *testing.T) {
+	re := require.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, opt, err := newTestScheduleConfig()
+	re.NoError(err)
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
+	store := &metapb.Store{
+		Id:            1,
+		Address:       "mock://tikv-1:20160",
+		StatusAddress: "mock://tikv-1:20180",
+		Version:       "2.0.0",
+		NodeState:     metapb.NodeState_Serving,
+	}
+	re.NoError(cluster.PutMetaStore(store))
+	re.Empty(cluster.GetStore(1).GetMeta().GetSqlAddress())
+
+	updated := &metapb.Store{
+		Id:            1,
+		Address:       store.Address,
+		StatusAddress: store.StatusAddress,
+		Version:       store.Version,
+		NodeState:     store.NodeState,
+		SqlAddress:    "mock://tikv-1:4000",
+	}
+	re.NoError(cluster.PutMetaStore(updated))
+	re.Equal(updated.SqlAddress, cluster.GetStore(1).GetMeta().GetSqlAddress())
+}
+
 func TestSetOfflineStore(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
